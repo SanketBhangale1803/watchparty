@@ -1,0 +1,9 @@
+{
+  "name": "watchparty-fullstack",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start",
+    "install-deps": "cd server && npm install && cd ../client && npm install"
+  }
+}
