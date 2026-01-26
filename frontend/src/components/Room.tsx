@@ -17,8 +17,8 @@ export const Room = ({
     const [sendingPc, setSendingPc] = useState<null | RTCPeerConnection>(null);
     const [, setReceivingPc] = useState<null | RTCPeerConnection>(null);
     const [remoteVideoTrack, setRemoteVideoTrack] = useState<MediaStreamTrack | null>(null);
-    const [, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null);
-    const [, setRemoteMediaStream] = useState<MediaStream | null>(null);
+    const [remoteAudioTrack, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null);
+    const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
@@ -28,7 +28,6 @@ export const Room = ({
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const screenShareRef = useRef<HTMLVideoElement>(null);
-    const remoteCameraRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
 
     const toggleFullscreen = async () => {
@@ -75,13 +74,13 @@ export const Room = ({
         }
     }, [screenTrack, isFullscreen]);
 
-    // Update remote camera view in sidebar
+    // Update remote video when track changes or screen sharing status changes
     useEffect(() => {
-        if (remoteCameraRef.current && remoteVideoTrack) {
-            remoteCameraRef.current.srcObject = new MediaStream([remoteVideoTrack]);
-            remoteCameraRef.current.play().catch(console.error);
+        if (remoteVideoRef.current && remoteMediaStream) {
+            remoteVideoRef.current.srcObject = remoteMediaStream;
+            remoteVideoRef.current.play().catch(console.error);
         }
-    }, [remoteVideoTrack, isFullscreen, isScreenSharing]);
+    }, [remoteMediaStream, remoteVideoTrack, remoteAudioTrack, isFullscreen, remoteIsScreenSharing]);
 
     useEffect(() => {
         const socket = io(URL);
@@ -238,11 +237,7 @@ export const Room = ({
         try {
             const screenStream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    sampleRate: 44100
-                }
+                audio: true  // Get screen audio if available
             });
             
             const screenVideoTrack = screenStream.getVideoTracks()[0];
@@ -253,7 +248,7 @@ export const Room = ({
                 setScreenAudioTrack(screenAudio);
             }
             
-            // Replace the video track in the peer connection
+            // Replace ONLY the video track - keep mic audio intact
             if (sendingPc) {
                 const videoSender = sendingPc.getSenders().find(
                     sender => sender.track?.kind === 'video'
@@ -262,17 +257,8 @@ export const Room = ({
                     await videoSender.replaceTrack(screenVideoTrack);
                 }
                 
-                // Add or replace audio track from screen share
-                if (screenAudio) {
-                    const audioSender = sendingPc.getSenders().find(
-                        sender => sender.track?.kind === 'audio'
-                    );
-                    if (audioSender) {
-                        await audioSender.replaceTrack(screenAudio);
-                    } else {
-                        sendingPc.addTrack(screenAudio);
-                    }
-                }
+                // Note: Adding screen audio would require renegotiation
+                // For simplicity, we only share video. Mic audio continues working.
             }
             
             setIsScreenSharing(true);
@@ -292,16 +278,15 @@ export const Room = ({
     };
 
     const stopScreenShare = async () => {
+        // Stop screen tracks
         if (screenTrack) {
             screenTrack.stop();
-            setScreenTrack(null);
         }
         if (screenAudioTrack) {
             screenAudioTrack.stop();
-            setScreenAudioTrack(null);
         }
         
-        // Replace back with camera track
+        // Replace back with camera video track
         if (sendingPc && localVideoTrack) {
             const videoSender = sendingPc.getSenders().find(
                 sender => sender.track?.kind === 'video'
@@ -311,16 +296,8 @@ export const Room = ({
             }
         }
         
-        // Replace back with mic audio
-        if (sendingPc && localAudioTrack) {
-            const audioSender = sendingPc.getSenders().find(
-                sender => sender.track?.kind === 'audio'
-            );
-            if (audioSender) {
-                await audioSender.replaceTrack(localAudioTrack);
-            }
-        }
-        
+        setScreenTrack(null);
+        setScreenAudioTrack(null);
         setIsScreenSharing(false);
         
         // Notify the other user that screen sharing stopped
@@ -441,46 +418,6 @@ export const Room = ({
                             You {isScreenSharing && '(Sharing)'}
                         </div>
                     </div>
-
-                    {/* 
-                        Remote camera video in sidebar:
-                        - Show only when I'M sharing my screen (so I can see the guest while sharing)
-                        - Don't show when REMOTE is sharing (their video track IS the screen share, already shown in main view)
-                    */}
-                    {isFullscreen && isScreenSharing && !remoteIsScreenSharing && (
-                        <div style={{
-                            position: 'relative',
-                            borderRadius: '8px',
-                            overflow: 'hidden',
-                            border: '2px solid #333',
-                            flexShrink: 0
-                        }}>
-                            <video 
-                                autoPlay 
-                                playsInline
-                                ref={remoteCameraRef}
-                                style={{ 
-                                    width: '100%',
-                                    height: '120px',
-                                    objectFit: 'cover',
-                                    backgroundColor: '#000',
-                                    display: 'block'
-                                }}
-                            />
-                            <div style={{
-                                position: 'absolute',
-                                bottom: '5px',
-                                left: '5px',
-                                backgroundColor: 'rgba(0,0,0,0.6)',
-                                color: 'white',
-                                padding: '2px 6px',
-                                borderRadius: '4px',
-                                fontSize: '11px'
-                            }}>
-                                Guest
-                            </div>
-                        </div>
-                    )}
 
                     {/* Controls in sidebar (fullscreen mode) */}
                     {isFullscreen && (
