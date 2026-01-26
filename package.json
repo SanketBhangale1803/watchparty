@@ -1,0 +1,13 @@
+{
+  "name": "watchparty-backend",
+  "version": "1.0.0",
+  "description": "WebRTC signaling server for watchparty",
+  "main": "backend/dist/index.js",
+  "scripts": {
+    "build": "cd backend && npm install && npm run build",
+    "start": "node backend/dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
