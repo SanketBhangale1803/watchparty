@@ -42,8 +42,8 @@ io.on('connection', (socket: Socket) => {
     });
 });
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = parseInt(process.env.PORT || '8080', 10);
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '8080', () => {
     console.log(`Server running on port ${PORT}`);
 });
