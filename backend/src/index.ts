@@ -8,6 +8,15 @@ import { UserManager } from "./managers/UserManger";
 const app = express();
 const server = http.createServer(app);
 
+// Health check route for Railway
+app.get('/', (req, res) => {
+  res.send('Watchparty signaling server is running');
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 const io = new Server(server, {
   cors: {
     origin: "*"
