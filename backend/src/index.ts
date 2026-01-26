@@ -1,37 +1,34 @@
 import { Socket } from "socket.io";
 import http from "http";
-
-import express from 'express';
+import express, { Request, Response } from 'express';
 import { Server } from 'socket.io';
 import { UserManager } from "./managers/UserManger";
-import cors from 'cors';
 
 const app = express();
 const server = http.createServer(app);
 
-// Enable CORS for all routes
-app.use(cors({
-    origin: "*",
-    methods: ["GET", "POST"]
-}));
-
-// Health check route for Railway
-app.get('/', (req, res) => {
-    res.send('Watchparty signaling server is running');
+// Manual CORS middleware (more reliable than cors package)
+app.use((_req: Request, res: Response, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    next();
 });
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+// Health check route for Railway
+app.get('/', (_req: Request, res: Response) => {
+    res.status(200).send('Watchparty signaling server is running');
+});
+
+app.get('/health', (_req: Request, res: Response) => {
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 const io = new Server(server, {
     cors: {
         origin: "*",
-        methods: ["GET", "POST"],
-        credentials: true
-    },
-    transports: ['websocket', 'polling'],
-    allowEIO3: true
+        methods: ["GET", "POST"]
+    }
 });
 
 const userManager = new UserManager();
@@ -42,10 +39,11 @@ io.on('connection', (socket: Socket) => {
     socket.on("disconnect", () => {
         console.log("user disconnected:", socket.id);
         userManager.removeUser(socket.id);
-    })
+    });
 });
 
 const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
