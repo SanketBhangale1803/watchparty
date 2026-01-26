@@ -19,6 +19,8 @@ export const Room = ({
     const [remoteVideoTrack, setRemoteVideoTrack] = useState<MediaStreamTrack | null>(null);
     const [remoteAudioTrack, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null);
     const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
+    const [remoteCameraTrack, setRemoteCameraTrack] = useState<MediaStreamTrack | null>(null);
+    const [, setRemoteScreenTrack] = useState<MediaStreamTrack | null>(null);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
@@ -29,7 +31,17 @@ export const Room = ({
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const screenShareRef = useRef<HTMLVideoElement>(null);
     const sidebarRemoteVideoRef = useRef<HTMLVideoElement>(null);
+    const sidebarRemoteCameraRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+
+    // Keep persistent refs for peer connections (needed for renegotiation)
+    const sendingPcRef = useRef<RTCPeerConnection | null>(null);
+    const receivingPcRef = useRef<RTCPeerConnection | null>(null);
+    const remoteCameraTrackRef = useRef<MediaStreamTrack | null>(null);
+
+    // Keep separate streams for main (screen/camera) and sidebar (remote camera)
+    //const remoteMainStreamRef = useRef<MediaStream | null>(null);
+    //const remoteCameraStreamRef = useRef<MediaStream | null>(null);
 
     const toggleFullscreen = async () => {
         if (!containerRef.current) return;
@@ -85,11 +97,19 @@ export const Room = ({
 
     // Update sidebar remote video (for both host sharing and guest viewing)
     useEffect(() => {
-        if (sidebarRemoteVideoRef.current && remoteMediaStream && (isScreenSharing || remoteIsScreenSharing) && isFullscreen) {
+        if (sidebarRemoteVideoRef.current && remoteMediaStream && isScreenSharing && isFullscreen) {
             sidebarRemoteVideoRef.current.srcObject = remoteMediaStream;
             sidebarRemoteVideoRef.current.play().catch(console.error);
         }
-    }, [remoteMediaStream, isScreenSharing, remoteIsScreenSharing, isFullscreen]);
+    }, [remoteMediaStream, isScreenSharing, isFullscreen]);
+
+    // Update sidebar with remote camera when viewing their screen share
+    useEffect(() => {
+        if (sidebarRemoteCameraRef.current && remoteCameraTrack && remoteIsScreenSharing && isFullscreen) {
+            sidebarRemoteCameraRef.current.srcObject = new MediaStream([remoteCameraTrack]);
+            sidebarRemoteCameraRef.current.play().catch(console.error);
+        }
+    }, [remoteCameraTrack, remoteIsScreenSharing, isFullscreen]);
 
     useEffect(() => {
         const socket = io(URL);
@@ -100,6 +120,8 @@ export const Room = ({
             const pc = new RTCPeerConnection();
 
             setSendingPc(pc);
+            sendingPcRef.current = pc;
+            
             if (localVideoTrack) {
                 console.error("added tack");
                 console.log(localVideoTrack)
@@ -138,61 +160,91 @@ export const Room = ({
             console.log("received offer");
             setLobby(false);
             setCurrentRoomId(roomId);
-            const pc = new RTCPeerConnection();
-            pc.setRemoteDescription(remoteSdp)
+
+            // Reuse existing receiving PC if present (renegotiation), else create new one
+            let pc = receivingPcRef.current;
+            if (!pc) {
+                pc = new RTCPeerConnection();
+                receivingPcRef.current = pc;
+                setReceivingPc(pc);
+                
+                const stream = new MediaStream();
+                if (remoteVideoRef.current) {
+                    remoteVideoRef.current.srcObject = stream;
+                }
+                setRemoteMediaStream(stream);
+
+                // Handle incoming tracks - camera, audio, and screen share
+                pc.ontrack = (event) => {
+                    const track = event.track;
+                    console.log("ontrack received:", track.kind, track.id);
+
+                    if (track.kind === 'video') {
+                        const existingVideoTracks = stream.getVideoTracks();
+                        
+                        if (existingVideoTracks.length === 0) {
+                            // First video track - this is the camera
+                            console.log("First video track (camera):", track.id);
+                            setRemoteCameraTrack(track);
+                            remoteCameraTrackRef.current = track;
+                            setRemoteVideoTrack(track);
+                            stream.addTrack(track);
+                        } else {
+                            // Second video track - this is the screen share
+                            console.log("Second video track (screen):", track.id);
+                            setRemoteScreenTrack(track);
+                            // Replace main view with screen share, keep camera in sidebar
+                            existingVideoTracks.forEach(t => stream.removeTrack(t));
+                            stream.addTrack(track);
+                            setRemoteVideoTrack(track);
+                        }
+                        
+                        // Listen for track ending (when host stops sharing)
+                        track.onended = () => {
+                            console.log("Track ended:", track.kind, track.id);
+                            if (track.kind === 'video') {
+                                // If screen share track ended, switch back to camera
+                                stream.removeTrack(track);
+                                const cameraTrack = remoteCameraTrackRef.current;
+                                if (cameraTrack) {
+                                    console.log("Switching back to camera:", cameraTrack.id);
+                                    stream.addTrack(cameraTrack);
+                                    setRemoteVideoTrack(cameraTrack);
+                                    setRemoteScreenTrack(null);
+                                }
+                            }
+                        };
+                    } else if (track.kind === 'audio') {
+                        setRemoteAudioTrack(track);
+                        stream.addTrack(track);
+                    }
+
+                    if (remoteVideoRef.current) {
+                        remoteVideoRef.current.srcObject = stream;
+                        remoteVideoRef.current.play().catch(console.error);
+                    }
+                };
+
+                pc.onicecandidate = async (e) => {
+                    if (!e.candidate) return;
+                    console.log("on ice candidate on receiving side");
+                    socket.emit("add-ice-candidate", {
+                        candidate: e.candidate,
+                        type: "receiver",
+                        roomId
+                    });
+                };
+                
+                //@ts-ignore
+                window.pcr = pc;
+            }
+
+            await pc.setRemoteDescription(remoteSdp);
             const sdp = await pc.createAnswer();
             //@ts-ignore
-            pc.setLocalDescription(sdp)
-            const stream = new MediaStream();
-            if (remoteVideoRef.current) {
-                remoteVideoRef.current.srcObject = stream;
-            }
+            await pc.setLocalDescription(sdp);
 
-            setRemoteMediaStream(stream);
-            // trickle ice 
-            setReceivingPc(pc);
-            //@ts-ignore
-            window.pcr = pc;
-            pc.ontrack = () => {
-                alert("ontrack");
-            }
-
-            pc.onicecandidate = async (e) => {
-                if (!e.candidate) {
-                    return;
-                }
-                console.log("omn ice candidate on receiving seide");
-                if (e.candidate) {
-                   socket.emit("add-ice-candidate", {
-                    candidate: e.candidate,
-                    type: "receiver",
-                    roomId
-                   })
-                }
-            }
-
-            socket.emit("answer", {
-                roomId,
-                sdp: sdp
-            });
-            setTimeout(() => {
-                const track1 = pc.getTransceivers()[0].receiver.track
-                const track2 = pc.getTransceivers()[1].receiver.track
-                console.log(track1);
-                if (track1.kind === "video") {
-                    setRemoteAudioTrack(track2)
-                    setRemoteVideoTrack(track1)
-                } else {
-                    setRemoteAudioTrack(track1)
-                    setRemoteVideoTrack(track2)
-                }
-                //@ts-ignore
-                remoteVideoRef.current.srcObject.addTrack(track1)
-                //@ts-ignore
-                remoteVideoRef.current.srcObject.addTrack(track2)
-                //@ts-ignore
-                remoteVideoRef.current.play();
-            }, 5000)
+            socket.emit("answer", { roomId, sdp });
         });
 
         socket.on("answer", ({sdp: remoteSdp}) => {
@@ -255,13 +307,9 @@ export const Room = ({
             setScreenTrack(screenVideoTrack);
             
             if (sendingPc) {
-                // Replace video track with screen share
-                const videoSender = sendingPc.getSenders().find(
-                    sender => sender.track?.kind === 'video'
-                );
-                if (videoSender) {
-                    await videoSender.replaceTrack(screenVideoTrack);
-                }
+                // Add screen share as a NEW track (don't replace camera)
+                // This triggers renegotiation and sends both camera and screen
+                sendingPc.addTrack(screenVideoTrack, screenStream);
                 
                 // If screen has audio, replace the audio track so guest can hear tab audio
                 if (screenAudio) {
@@ -290,6 +338,16 @@ export const Room = ({
     };
 
     const stopScreenShare = async () => {
+        if (sendingPc && screenTrack) {
+            // Remove the screen share track
+            const screenSender = sendingPc.getSenders().find(
+                sender => sender.track === screenTrack
+            );
+            if (screenSender) {
+                sendingPc.removeTrack(screenSender);
+            }
+        }
+        
         if (screenTrack) {
             screenTrack.stop();
         }
@@ -298,16 +356,6 @@ export const Room = ({
         }
         
         if (sendingPc) {
-            // Replace back with camera video track
-            if (localVideoTrack) {
-                const videoSender = sendingPc.getSenders().find(
-                    sender => sender.track?.kind === 'video'
-                );
-                if (videoSender) {
-                    await videoSender.replaceTrack(localVideoTrack);
-                }
-            }
-            
             // Replace back with mic audio track
             if (localAudioTrack) {
                 const audioSender = sendingPc.getSenders().find(
@@ -411,7 +459,7 @@ export const Room = ({
                             position: 'relative',
                             borderRadius: '8px',
                             overflow: 'hidden',
-                            border: isScreenSharing ? '2px solid #4CAF50' : '2px solid #333',
+                            border: isScreenSharing ? '2px solid #4CAF50' : (remoteIsScreenSharing ? '2px solid #2196F3' : '2px solid #333'),
                             flexShrink: 0
                         }}>
                             <video 
@@ -443,12 +491,10 @@ export const Room = ({
                     )}
 
                     {/* 
-                        Remote video in sidebar - ONLY when I'M sharing (isScreenSharing)
-                        In this case, remoteMediaStream contains the guest's camera
-                        
-                        When remote is sharing (remoteIsScreenSharing), their camera track 
-                        has been replaced with screen share, so we can't show their camera separately.
-                        The screen share is already shown in the main view.
+                        Remote video in sidebar - show when:
+                        1. I'M sharing (isScreenSharing) - show guest's camera in sidebar
+                        2. Remote is sharing (remoteIsScreenSharing) - their track was replaced with screen,
+                           so we can't show their camera, but we show indicator
                     */}
                     {isFullscreen && isScreenSharing && (
                         <div style={{
@@ -481,6 +527,42 @@ export const Room = ({
                                 fontSize: '11px'
                             }}>
                                 Guest
+                            </div>
+                        </div>
+                    )}
+
+                    {/* When remote is sharing - show their camera in sidebar */}
+                    {isFullscreen && remoteIsScreenSharing && !isScreenSharing && (
+                        <div style={{
+                            position: 'relative',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            border: '2px solid #4CAF50',
+                            flexShrink: 0
+                        }}>
+                            <video 
+                                autoPlay 
+                                playsInline
+                                ref={sidebarRemoteCameraRef}
+                                style={{ 
+                                    width: '100%',
+                                    height: '120px',
+                                    objectFit: 'cover',
+                                    backgroundColor: '#000',
+                                    display: 'block'
+                                }}
+                            />
+                            <div style={{
+                                position: 'absolute',
+                                bottom: '5px',
+                                left: '5px',
+                                backgroundColor: 'rgba(0,0,0,0.6)',
+                                color: 'white',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '11px'
+                            }}>
+                                Host (Sharing)
                             </div>
                         </div>
                     )}
