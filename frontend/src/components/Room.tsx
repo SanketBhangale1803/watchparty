@@ -24,15 +24,21 @@ export const Room = ({
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
-    const remoteVideoRef = useRef<HTMLVideoElement>();
-    const localVideoRef = useRef<HTMLVideoElement>();
+    const [screenAudioTrack, setScreenAudioTrack] = useState<MediaStreamTrack | null>(null);
+    const [remoteIsScreenSharing, setRemoteIsScreenSharing] = useState(false);
+    const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
+    const remoteVideoRef = useRef<HTMLVideoElement>(null);
+    const localVideoRef = useRef<HTMLVideoElement>(null);
+    const screenShareRef = useRef<HTMLVideoElement>(null);
+    const remoteCameraRef = useRef<HTMLVideoElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
 
     const toggleFullscreen = async () => {
-        if (!remoteVideoRef.current) return;
+        if (!containerRef.current) return;
 
         try {
             if (!document.fullscreenElement) {
-                await remoteVideoRef.current.requestFullscreen();
+                await containerRef.current.requestFullscreen();
                 setIsFullscreen(true);
             } else {
                 await document.exitFullscreen();
@@ -55,11 +61,36 @@ export const Room = ({
         };
     }, []);
 
+    // Update local video stream (always show camera, not screen share)
+    useEffect(() => {
+        if (localVideoRef.current && localVideoTrack) {
+            localVideoRef.current.srcObject = new MediaStream([localVideoTrack]);
+            localVideoRef.current.play().catch(console.error);
+        }
+    }, [localVideoTrack, isFullscreen]);
+
+    // Update screen share preview (for the person sharing)
+    useEffect(() => {
+        if (screenShareRef.current && screenTrack) {
+            screenShareRef.current.srcObject = new MediaStream([screenTrack]);
+            screenShareRef.current.play().catch(console.error);
+        }
+    }, [screenTrack, isFullscreen]);
+
+    // Update remote camera view in sidebar
+    useEffect(() => {
+        if (remoteCameraRef.current && remoteVideoTrack) {
+            remoteCameraRef.current.srcObject = new MediaStream([remoteVideoTrack]);
+            remoteCameraRef.current.play().catch(console.error);
+        }
+    }, [remoteVideoTrack, isFullscreen, isScreenSharing]);
+
     useEffect(() => {
         const socket = io(URL);
         socket.on('send-offer', async ({roomId}) => {
             console.log("sending offer");
             setLobby(false);
+            setCurrentRoomId(roomId);
             const pc = new RTCPeerConnection();
 
             setSendingPc(pc);
@@ -100,6 +131,7 @@ export const Room = ({
         socket.on("offer", async ({roomId, sdp: remoteSdp}) => {
             console.log("received offer");
             setLobby(false);
+            setCurrentRoomId(roomId);
             const pc = new RTCPeerConnection();
             pc.setRemoteDescription(remoteSdp)
             const sdp = await pc.createAnswer();
@@ -113,22 +145,10 @@ export const Room = ({
             setRemoteMediaStream(stream);
             // trickle ice 
             setReceivingPc(pc);
+            //@ts-ignore
             window.pcr = pc;
-            pc.ontrack = (e) => {
+            pc.ontrack = () => {
                 alert("ontrack");
-                // console.error("inside ontrack");
-                // const {track, type} = e;
-                // if (type == 'audio') {
-                //     // setRemoteAudioTrack(track);
-                //     // @ts-ignore
-                //     remoteVideoRef.current.srcObject.addTrack(track)
-                // } else {
-                //     // setRemoteVideoTrack(track);
-                //     // @ts-ignore
-                //     remoteVideoRef.current.srcObject.addTrack(track)
-                // }
-                // //@ts-ignore
-                // remoteVideoRef.current.play();
             }
 
             pc.onicecandidate = async (e) => {
@@ -166,20 +186,10 @@ export const Room = ({
                 remoteVideoRef.current.srcObject.addTrack(track2)
                 //@ts-ignore
                 remoteVideoRef.current.play();
-                // if (type == 'audio') {
-                //     // setRemoteAudioTrack(track);
-                //     // @ts-ignore
-                //     remoteVideoRef.current.srcObject.addTrack(track)
-                // } else {
-                //     // setRemoteVideoTrack(track);
-                //     // @ts-ignore
-                //     remoteVideoRef.current.srcObject.addTrack(track)
-                // }
-                // //@ts-ignore
             }, 5000)
         });
 
-        socket.on("answer", ({roomId, sdp: remoteSdp}) => {
+        socket.on("answer", ({sdp: remoteSdp}) => {
             setLobby(false);
             setSendingPc(pc => {
                 pc?.setRemoteDescription(remoteSdp)
@@ -218,27 +228,32 @@ export const Room = ({
             }
         })
 
+        // Listen for remote screen share status
+        socket.on("screen-share-status", ({isSharing}) => {
+            setRemoteIsScreenSharing(isSharing);
+        })
+
         setSocket(socket)
     }, [name])
-
-    useEffect(() => {
-        if (localVideoRef.current) {
-            if (localVideoTrack) {
-                localVideoRef.current.srcObject = new MediaStream([localVideoTrack]);
-                localVideoRef.current.play();
-            }
-        }
-    }, [localVideoRef])
 
     const startScreenShare = async () => {
         try {
             const screenStream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
-                audio: true
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    sampleRate: 44100
+                }
             });
             
             const screenVideoTrack = screenStream.getVideoTracks()[0];
+            const screenAudio = screenStream.getAudioTracks()[0];
+            
             setScreenTrack(screenVideoTrack);
+            if (screenAudio) {
+                setScreenAudioTrack(screenAudio);
+            }
             
             // Replace the video track in the peer connection
             if (sendingPc) {
@@ -248,14 +263,26 @@ export const Room = ({
                 if (videoSender) {
                     await videoSender.replaceTrack(screenVideoTrack);
                 }
-            }
-            
-            // Update local video preview
-            if (localVideoRef.current) {
-                localVideoRef.current.srcObject = new MediaStream([screenVideoTrack]);
+                
+                // Add or replace audio track from screen share
+                if (screenAudio) {
+                    const audioSender = sendingPc.getSenders().find(
+                        sender => sender.track?.kind === 'audio'
+                    );
+                    if (audioSender) {
+                        await audioSender.replaceTrack(screenAudio);
+                    } else {
+                        sendingPc.addTrack(screenAudio);
+                    }
+                }
             }
             
             setIsScreenSharing(true);
+            
+            // Notify the other user that screen sharing started
+            if (socket && currentRoomId) {
+                socket.emit("screen-share-status", { isSharing: true, roomId: currentRoomId });
+            }
             
             // Handle when user stops screen share via browser UI
             screenVideoTrack.onended = () => {
@@ -271,6 +298,10 @@ export const Room = ({
             screenTrack.stop();
             setScreenTrack(null);
         }
+        if (screenAudioTrack) {
+            screenAudioTrack.stop();
+            setScreenAudioTrack(null);
+        }
         
         // Replace back with camera track
         if (sendingPc && localVideoTrack) {
@@ -282,12 +313,22 @@ export const Room = ({
             }
         }
         
-        // Update local video preview back to camera
-        if (localVideoRef.current && localVideoTrack) {
-            localVideoRef.current.srcObject = new MediaStream([localVideoTrack]);
+        // Replace back with mic audio
+        if (sendingPc && localAudioTrack) {
+            const audioSender = sendingPc.getSenders().find(
+                sender => sender.track?.kind === 'audio'
+            );
+            if (audioSender) {
+                await audioSender.replaceTrack(localAudioTrack);
+            }
         }
         
         setIsScreenSharing(false);
+        
+        // Notify the other user that screen sharing stopped
+        if (socket && currentRoomId) {
+            socket.emit("screen-share-status", { isSharing: false, roomId: currentRoomId });
+        }
     };
 
     const toggleScreenShare = () => {
@@ -298,74 +339,254 @@ export const Room = ({
         }
     };
 
-    return <div>
-    Hi {name}
-    <video autoPlay width={400} height={400} ref={localVideoRef} />
-    {lobby ? "Waiting to connect you to someone" : null}
-    
-    <div style={{ position: 'relative', display: 'inline-block' }}>
-        <video 
-            autoPlay 
-            width={400} 
-            height={400} 
-            ref={remoteVideoRef}
-            onDoubleClick={toggleFullscreen}
-            style={{ cursor: 'pointer' }}
-        />
-        {!lobby && (
-            <button
-                onClick={toggleFullscreen}
-                style={{
-                    position: 'absolute',
-                    bottom: '10px',
-                    right: '10px',
-                    padding: '8px 12px',
-                    fontSize: '14px',
-                    cursor: 'pointer',
-                    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '5px'
-                }}
-                title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
-            >
-                {isFullscreen ? '⛶' : '⛶'}
-            </button>
-        )}
-    </div>
-    
-    {!lobby && (
-        <div style={{ marginTop: '10px' }}>
-            <button 
-                onClick={toggleScreenShare}
-                style={{
-                    padding: '10px 20px',
-                    fontSize: '16px',
-                    cursor: 'pointer',
-                    backgroundColor: isScreenSharing ? '#ff4444' : '#4CAF50',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '5px',
-                    marginRight: '10px'
-                }}
-            >
-                {isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
-            </button>
-            <button 
-                onClick={toggleFullscreen}
-                style={{
-                    padding: '10px 20px',
-                    fontSize: '16px',
-                    cursor: 'pointer',
-                    backgroundColor: '#2196F3',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '5px'
-                }}
-            >
-                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-            </button>
+    // Check if anyone is sharing screen (either local or remote)
+    const anyoneSharing = isScreenSharing || remoteIsScreenSharing;
+
+    return (
+        <div 
+            ref={containerRef}
+            style={{
+                backgroundColor: isFullscreen ? '#000' : 'transparent',
+                width: isFullscreen ? '100vw' : 'auto',
+                height: isFullscreen ? '100vh' : 'auto',
+                position: 'relative',
+                display: 'flex',
+                flexDirection: isFullscreen ? 'row' : 'column',
+                alignItems: 'center',
+                justifyContent: 'center'
+            }}
+        >
+            {!isFullscreen && <div>Hi {name}</div>}
+            {lobby ? <div>Waiting to connect you to someone</div> : null}
+            
+            {/* Main video container */}
+            <div style={{ 
+                position: 'relative', 
+                display: 'flex',
+                width: isFullscreen ? '100%' : 'auto',
+                height: isFullscreen ? '100%' : 'auto',
+            }}>
+                {/* Main view - shows screen share when active, otherwise remote video */}
+                {isScreenSharing ? (
+                    // Show my screen share as main view (for the sharer)
+                    <video 
+                        autoPlay 
+                        playsInline
+                        ref={screenShareRef}
+                        onDoubleClick={toggleFullscreen}
+                        style={{ 
+                            width: isFullscreen ? 'calc(100% - 220px)' : 400,
+                            height: isFullscreen ? '100%' : 400,
+                            cursor: 'pointer',
+                            objectFit: isFullscreen ? 'contain' : 'cover',
+                            backgroundColor: '#000'
+                        }}
+                    />
+                ) : (
+                    // Show remote video as main view (could be their camera or their screen share)
+                    <video 
+                        autoPlay 
+                        playsInline
+                        ref={remoteVideoRef}
+                        onDoubleClick={toggleFullscreen}
+                        style={{ 
+                            width: isFullscreen ? 'calc(100% - 220px)' : 400,
+                            height: isFullscreen ? '100%' : 400,
+                            cursor: 'pointer',
+                            objectFit: isFullscreen ? 'contain' : 'cover',
+                            backgroundColor: '#000'
+                        }}
+                    />
+                )}
+                
+                {/* Side panel - contains BOTH local and remote videos */}
+                <div style={{
+                    width: isFullscreen ? '220px' : 'auto',
+                    height: isFullscreen ? '100%' : 'auto',
+                    backgroundColor: isFullscreen ? '#1a1a1a' : 'transparent',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    padding: isFullscreen ? '10px' : '0',
+                    marginLeft: isFullscreen ? '0' : '10px',
+                    boxSizing: 'border-box',
+                    gap: '10px',
+                    overflowY: 'auto'
+                }}>
+                    {/* Local video (your camera) - always visible */}
+                    <div style={{
+                        position: 'relative',
+                        borderRadius: '8px',
+                        overflow: 'hidden',
+                        border: isScreenSharing ? '2px solid #4CAF50' : '2px solid #333',
+                        flexShrink: 0
+                    }}>
+                        <video 
+                            autoPlay 
+                            muted
+                            playsInline
+                            ref={localVideoRef}
+                            style={{ 
+                                width: isFullscreen ? '100%' : 400,
+                                height: isFullscreen ? '120px' : 400,
+                                objectFit: 'cover',
+                                backgroundColor: '#000',
+                                display: 'block'
+                            }}
+                        />
+                        <div style={{
+                            position: 'absolute',
+                            bottom: '5px',
+                            left: '5px',
+                            backgroundColor: 'rgba(0,0,0,0.6)',
+                            color: 'white',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            fontSize: '11px'
+                        }}>
+                            You {isScreenSharing && '(Sharing)'}
+                        </div>
+                    </div>
+
+                    {/* 
+                        Remote camera video in sidebar:
+                        - Show only when I'M sharing my screen (so I can see the guest while sharing)
+                        - Don't show when REMOTE is sharing (their video track IS the screen share, already shown in main view)
+                    */}
+                    {isFullscreen && isScreenSharing && !remoteIsScreenSharing && (
+                        <div style={{
+                            position: 'relative',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            border: '2px solid #333',
+                            flexShrink: 0
+                        }}>
+                            <video 
+                                autoPlay 
+                                playsInline
+                                ref={remoteCameraRef}
+                                style={{ 
+                                    width: '100%',
+                                    height: '120px',
+                                    objectFit: 'cover',
+                                    backgroundColor: '#000',
+                                    display: 'block'
+                                }}
+                            />
+                            <div style={{
+                                position: 'absolute',
+                                bottom: '5px',
+                                left: '5px',
+                                backgroundColor: 'rgba(0,0,0,0.6)',
+                                color: 'white',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '11px'
+                            }}>
+                                Guest
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Controls in sidebar (fullscreen mode) */}
+                    {isFullscreen && (
+                        <div style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '8px',
+                            marginTop: 'auto'
+                        }}>
+                            <button 
+                                onClick={toggleScreenShare}
+                                style={{
+                                    padding: '10px',
+                                    fontSize: '14px',
+                                    cursor: 'pointer',
+                                    backgroundColor: isScreenSharing ? '#ff4444' : '#4CAF50',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '5px'
+                                }}
+                            >
+                                {isScreenSharing ? '⏹ Stop Share' : '🖥 Share Screen'}
+                            </button>
+                            <button 
+                                onClick={toggleFullscreen}
+                                style={{
+                                    padding: '10px',
+                                    fontSize: '14px',
+                                    cursor: 'pointer',
+                                    backgroundColor: '#2196F3',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '5px'
+                                }}
+                            >
+                                ⛶ Exit Fullscreen
+                            </button>
+                        </div>
+                    )}
+                </div>
+
+                {/* Fullscreen button overlay (only in non-fullscreen mode) */}
+                {!lobby && !isFullscreen && (
+                    <button
+                        onClick={toggleFullscreen}
+                        style={{
+                            position: 'absolute',
+                            bottom: '10px',
+                            left: '10px',
+                            padding: '8px 12px',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                            backgroundColor: 'rgba(0, 0, 0, 0.6)',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '5px'
+                        }}
+                        title="Enter Fullscreen"
+                    >
+                        ⛶ Fullscreen
+                    </button>
+                )}
+            </div>
+            
+            {/* Controls bar (non-fullscreen mode) */}
+            {!lobby && !isFullscreen && (
+                <div style={{ 
+                    marginTop: '10px',
+                    display: 'flex',
+                    gap: '10px'
+                }}>
+                    <button 
+                        onClick={toggleScreenShare}
+                        style={{
+                            padding: '10px 20px',
+                            fontSize: '16px',
+                            cursor: 'pointer',
+                            backgroundColor: isScreenSharing ? '#ff4444' : '#4CAF50',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '5px'
+                        }}
+                    >
+                        {isScreenSharing ? '⏹ Stop Sharing' : '🖥 Share Screen'}
+                    </button>
+                    <button 
+                        onClick={toggleFullscreen}
+                        style={{
+                            padding: '10px 20px',
+                            fontSize: '16px',
+                            cursor: 'pointer',
+                            backgroundColor: '#2196F3',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '5px'
+                        }}
+                    >
+                        ⛶ Fullscreen
+                    </button>
+                </div>
+            )}
         </div>
-    )}
-</div>
+    );
 }

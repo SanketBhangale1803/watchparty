@@ -1,4 +1,4 @@
- import { User } from "./UserManger";
+import { User } from "./UserManger";
 
 let GLOBAL_ROOM_ID = 1;
 
@@ -61,6 +61,15 @@ export class RoomManager {
         }
         const receivingUser = room.user1.socket.id === senderSocketid ? room.user2: room.user1;
         receivingUser.socket.emit("add-ice-candidate", ({candidate, type}));
+    }
+
+    onScreenShareStatus(roomId: string, senderSocketid: string, isSharing: boolean) {
+        const room = this.rooms.get(roomId);
+        if (!room) {
+            return;
+        }
+        const receivingUser = room.user1.socket.id === senderSocketid ? room.user2 : room.user1;
+        receivingUser.socket.emit("screen-share-status", { isSharing });
     }
 
     generate() {
