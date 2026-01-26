@@ -15,10 +15,10 @@ export const Room = ({
     const [lobby, setLobby] = useState(true);
     const [socket, setSocket] = useState<null | Socket>(null);
     const [sendingPc, setSendingPc] = useState<null | RTCPeerConnection>(null);
-    const [receivingPc, setReceivingPc] = useState<null | RTCPeerConnection>(null);
+    const [, setReceivingPc] = useState<null | RTCPeerConnection>(null);
     const [remoteVideoTrack, setRemoteVideoTrack] = useState<MediaStreamTrack | null>(null);
-    const [remoteAudioTrack, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null);
-    const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
+    const [, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null);
+    const [, setRemoteMediaStream] = useState<MediaStream | null>(null);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
@@ -336,9 +336,6 @@ export const Room = ({
             startScreenShare();
         }
     };
-
-    // Check if anyone is sharing screen (either local or remote)
-    const anyoneSharing = isScreenSharing || remoteIsScreenSharing;
 
     return (
         <div 
