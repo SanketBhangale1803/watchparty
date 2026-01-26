@@ -38,6 +38,7 @@ export const Room = ({
     const sendingPcRef = useRef<RTCPeerConnection | null>(null);
     const receivingPcRef = useRef<RTCPeerConnection | null>(null);
     const remoteCameraTrackRef = useRef<MediaStreamTrack | null>(null);
+    //const remoteStreamRef = useRef<MediaStream | null>(null);
 
     // Keep separate streams for main (screen/camera) and sidebar (remote camera)
     //const remoteMainStreamRef = useRef<MediaStream | null>(null);
@@ -288,7 +289,41 @@ export const Room = ({
 
         // Listen for remote screen share status
         socket.on("screen-share-status", ({isSharing}) => {
+            console.log("Remote screen share status changed:", isSharing);
             setRemoteIsScreenSharing(isSharing);
+            
+            // When remote stops sharing, switch back to camera in main view
+            if (!isSharing) {
+                setTimeout(() => {
+                    const stream = remoteVideoRef.current?.srcObject as MediaStream;
+                    const cameraTrack = remoteCameraTrackRef.current;
+                    
+                    if (stream && cameraTrack) {
+                        console.log("Switching back to camera after remote stopped sharing");
+                        const videoTracks = stream.getVideoTracks();
+                        console.log("Current video tracks:", videoTracks.length);
+                        
+                        // Remove all video tracks
+                        videoTracks.forEach(t => {
+                            console.log("Removing track:", t.id);
+                            stream.removeTrack(t);
+                        });
+                        
+                        // Add camera track back
+                        console.log("Adding camera track back:", cameraTrack.id);
+                        stream.addTrack(cameraTrack);
+                        setRemoteVideoTrack(cameraTrack);
+                        
+                        // Force video element to refresh
+                        if (remoteVideoRef.current) {
+                            remoteVideoRef.current.srcObject = stream;
+                            remoteVideoRef.current.play().catch(console.error);
+                        }
+                    } else {
+                        console.log("Stream or camera track not found", {stream: !!stream, cameraTrack: !!cameraTrack});
+                    }
+                }, 500);
+            }
         })
 
         setSocket(socket)
