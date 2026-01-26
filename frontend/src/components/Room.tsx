@@ -83,13 +83,13 @@ export const Room = ({
         }
     }, [remoteMediaStream, remoteVideoTrack, remoteAudioTrack, isFullscreen, remoteIsScreenSharing]);
 
-    // Update sidebar remote video (duplicate of remote stream for sidebar)
+    // Update sidebar remote video (for both host sharing and guest viewing)
     useEffect(() => {
-        if (sidebarRemoteVideoRef.current && remoteMediaStream && isScreenSharing && isFullscreen) {
+        if (sidebarRemoteVideoRef.current && remoteMediaStream && (isScreenSharing || remoteIsScreenSharing) && isFullscreen) {
             sidebarRemoteVideoRef.current.srcObject = remoteMediaStream;
             sidebarRemoteVideoRef.current.play().catch(console.error);
         }
-    }, [remoteMediaStream, isScreenSharing, isFullscreen]);
+    }, [remoteMediaStream, isScreenSharing, remoteIsScreenSharing, isFullscreen]);
 
     useEffect(() => {
         const socket = io(URL);
@@ -442,7 +442,14 @@ export const Room = ({
                         </div>
                     )}
 
-                    {/* Remote video in sidebar - visible when I'M sharing in fullscreen */}
+                    {/* 
+                        Remote video in sidebar - ONLY when I'M sharing (isScreenSharing)
+                        In this case, remoteMediaStream contains the guest's camera
+                        
+                        When remote is sharing (remoteIsScreenSharing), their camera track 
+                        has been replaced with screen share, so we can't show their camera separately.
+                        The screen share is already shown in the main view.
+                    */}
                     {isFullscreen && isScreenSharing && (
                         <div style={{
                             position: 'relative',
