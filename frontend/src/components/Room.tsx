@@ -28,6 +28,7 @@ export const Room = ({
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const screenShareRef = useRef<HTMLVideoElement>(null);
+    const screenAudioRef = useRef<HTMLAudioElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
 
     const toggleFullscreen = async () => {
@@ -73,6 +74,14 @@ export const Room = ({
             screenShareRef.current.play().catch(console.error);
         }
     }, [screenTrack, isFullscreen]);
+
+    // Play screen audio separately (so both mic and screen audio can be heard)
+    useEffect(() => {
+        if (screenAudioRef.current && screenAudioTrack) {
+            screenAudioRef.current.srcObject = new MediaStream([screenAudioTrack]);
+            screenAudioRef.current.play().catch(console.error);
+        }
+    }, [screenAudioTrack]);
 
     // Update remote video when track changes or screen sharing status changes
     useEffect(() => {
@@ -286,6 +295,11 @@ export const Room = ({
             screenAudioTrack.stop();
         }
         
+        // Clear screen audio
+        if (screenAudioRef.current) {
+            screenAudioRef.current.srcObject = null;
+        }
+
         // Replace back with camera video track
         if (sendingPc && localVideoTrack) {
             const videoSender = sendingPc.getSenders().find(
@@ -328,6 +342,9 @@ export const Room = ({
                 justifyContent: 'center'
             }}
         >
+            {/* Hidden audio element for screen share audio */}
+            <audio ref={screenAudioRef} autoPlay style={{ display: 'none' }} />
+
             {!isFullscreen && <div>Hi {name}</div>}
             {lobby ? <div>Waiting to connect you to someone</div> : null}
             
@@ -418,6 +435,44 @@ export const Room = ({
                             You {isScreenSharing && '(Sharing)'}
                         </div>
                     </div>
+
+                    {/* Remote video in sidebar - visible in fullscreen when screen is being shared */}
+                    {isFullscreen && (isScreenSharing || remoteIsScreenSharing) && (
+                        <div style={{
+                            position: 'relative',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            border: remoteIsScreenSharing ? '2px solid #4CAF50' : '2px solid #333',
+                            flexShrink: 0
+                        }}>
+                            <video 
+                                autoPlay 
+                                playsInline
+                                ref={isScreenSharing ? remoteVideoRef : undefined}
+                                srcObject={isScreenSharing ? undefined : (localVideoTrack ? new MediaStream([localVideoTrack]) : null)}
+                                muted={!isScreenSharing}
+                                style={{ 
+                                    width: '100%',
+                                    height: '120px',
+                                    objectFit: 'cover',
+                                    backgroundColor: '#000',
+                                    display: 'block'
+                                }}
+                            />
+                            <div style={{
+                                position: 'absolute',
+                                bottom: '5px',
+                                left: '5px',
+                                backgroundColor: 'rgba(0,0,0,0.6)',
+                                color: 'white',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontSize: '11px'
+                            }}>
+                                {isScreenSharing ? 'Guest' : 'You'}
+                            </div>
+                        </div>
+                    )}
 
                     {/* Controls in sidebar (fullscreen mode) */}
                     {isFullscreen && (
