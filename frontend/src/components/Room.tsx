@@ -368,8 +368,20 @@ export const Room = ({
                     const localAudioSource = audioContext.createMediaStreamSource(new MediaStream([localAudioTrack]));
                     const screenAudioSource = audioContext.createMediaStreamSource(new MediaStream([screenAudio]));
 
-                    localAudioSource.connect(destination);
-                    screenAudioSource.connect(destination);
+                    // Create gain nodes to boost microphone volume
+                    const micGain = audioContext.createGain();
+                    const screenGain = audioContext.createGain();
+                    
+                    // Boost microphone volume (3x louder)
+                    micGain.gain.value = 3.0;
+                    // Keep screen audio at normal level
+                    screenGain.gain.value = 1.0;
+
+                    localAudioSource.connect(micGain);
+                    micGain.connect(destination);
+                    
+                    screenAudioSource.connect(screenGain);
+                    screenGain.connect(destination);
 
                     const mixedTrack = destination.stream.getAudioTracks()[0];
                     setMixedAudioTrack(mixedTrack);
