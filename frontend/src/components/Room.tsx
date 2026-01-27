@@ -27,6 +27,8 @@ export const Room = ({
     const [screenAudioTrack, setScreenAudioTrack] = useState<MediaStreamTrack | null>(null);
     const [remoteIsScreenSharing, setRemoteIsScreenSharing] = useState(false);
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
+    const [mixedAudioTrack, setMixedAudioTrack] = useState<MediaStreamTrack | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const screenShareRef = useRef<HTMLVideoElement>(null);
@@ -356,6 +358,29 @@ export const Room = ({
                         await audioSender.replaceTrack(screenAudio);
                     }
                 }
+
+                // Mix microphone and screen audio
+                if (localAudioTrack && screenAudio) {
+                    const audioContext = new AudioContext();
+                    audioContextRef.current = audioContext;
+
+                    const destination = audioContext.createMediaStreamDestination();
+                    const localAudioSource = audioContext.createMediaStreamSource(new MediaStream([localAudioTrack]));
+                    const screenAudioSource = audioContext.createMediaStreamSource(new MediaStream([screenAudio]));
+
+                    localAudioSource.connect(destination);
+                    screenAudioSource.connect(destination);
+
+                    const mixedTrack = destination.stream.getAudioTracks()[0];
+                    setMixedAudioTrack(mixedTrack);
+
+                    const audioSender = sendingPc.getSenders().find(
+                        sender => sender.track?.kind === 'audio'
+                    );
+                    if (audioSender) {
+                        await audioSender.replaceTrack(mixedTrack);
+                    }
+                }
             }
             
             setIsScreenSharing(true);
@@ -389,6 +414,13 @@ export const Room = ({
         if (screenAudioTrack) {
             screenAudioTrack.stop();
         }
+        if (mixedAudioTrack) {
+            mixedAudioTrack.stop();
+        }
+        if (audioContextRef.current) {
+            audioContextRef.current.close();
+            audioContextRef.current = null;
+        }
         
         if (sendingPc) {
             // Replace back with mic audio track
@@ -404,6 +436,7 @@ export const Room = ({
         
         setScreenTrack(null);
         setScreenAudioTrack(null);
+        setMixedAudioTrack(null);
         setIsScreenSharing(false);
         
         if (socket && currentRoomId) {
