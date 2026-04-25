@@ -56,6 +56,7 @@ export const Landing = () => {
                             muted
                             playsInline
                             ref={videoRef}
+                            style={{ transform: "scaleX(-1)" }}
                         />
                     </div>
 

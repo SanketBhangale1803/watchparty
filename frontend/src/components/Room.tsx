@@ -13,6 +13,7 @@ type ParticipantState = {
     name: string;
     sourceStream: MediaStream;
     displayStream: MediaStream;
+    cameraStream: MediaStream;
     isSharingScreen: boolean;
     screenTrackId: string | null;
 };
@@ -20,24 +21,29 @@ type ParticipantState = {
 const ParticipantVideo = ({
     stream,
     label,
-    muted,
     prioritized,
-    paused
+    paused,
+    mirrored
 }: {
     stream: MediaStream | null;
     label: string;
-    muted: boolean;
     prioritized?: boolean;
     paused?: boolean;
+    mirrored?: boolean;
 }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const [isVideoReady, setIsVideoReady] = useState(false);
 
     useEffect(() => {
         if (!videoRef.current) {
             return;
         }
+        setIsVideoReady(false);
         videoRef.current.srcObject = stream;
         videoRef.current.play().catch(() => undefined);
+        if (!stream) {
+            setIsVideoReady(true);
+        }
     }, [stream]);
 
     useEffect(() => {
@@ -58,19 +64,54 @@ const ParticipantVideo = ({
                 width: "100%",
                 height: "100%",
                 border: prioritized ? "2px solid var(--success)" : "1px solid var(--border)",
-                borderRadius: "0.75rem"
+                borderRadius: "0.75rem",
+                transition: "border-color 220ms ease, box-shadow 220ms ease"
             }}
         >
             <video
                 ref={videoRef}
                 autoPlay
                 playsInline
-                muted={muted}
-                style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000" }}
+                muted
+                onLoadedData={() => setIsVideoReady(true)}
+                style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    background: "#000",
+                    transform: mirrored ? "scaleX(-1)" : "none",
+                    opacity: isVideoReady ? 1 : 0,
+                    transition: "opacity 220ms ease, transform 220ms ease"
+                }}
             />
             <div className="badge">{label}</div>
         </div>
     );
+};
+
+const ParticipantAudio = ({ stream, boost = 1.7 }: { stream: MediaStream | null; boost?: number }) => {
+    useEffect(() => {
+        if (!stream) {
+            return;
+        }
+
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(stream);
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = boost;
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        audioContext.resume().catch(() => undefined);
+
+        return () => {
+            source.disconnect();
+            gainNode.disconnect();
+            audioContext.close().catch(() => undefined);
+        };
+    }, [stream, boost]);
+
+    return null;
 };
 
 export const Room = ({
@@ -95,12 +136,15 @@ export const Room = ({
     const containerRef = useRef<HTMLDivElement>(null);
     const localPreviewRef = useRef<HTMLVideoElement>(null);
     const socketRef = useRef<Socket | null>(null);
+    const socketIdRef = useRef<string | null>(null);
     const currentRoomIdRef = useRef<string | null>(null);
 
     const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+    const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
     const peerNamesRef = useRef<Map<string, string>>(new Map());
     const participantStateRef = useRef<Map<string, ParticipantState>>(new Map());
     const screenStatusRef = useRef<Map<string, { isSharing: boolean; trackId: string | null }>>(new Map());
+    const makingOfferRef = useRef<Map<string, boolean>>(new Map());
 
     const localStreamRef = useRef<MediaStream>(new MediaStream());
     const screenStreamRef = useRef<MediaStream | null>(null);
@@ -121,12 +165,11 @@ export const Room = ({
 
         const allVideoTracks = participant.sourceStream.getVideoTracks();
         const allAudioTracks = participant.sourceStream.getAudioTracks();
-        let selectedVideoTrack: MediaStreamTrack | null = allVideoTracks[0] ?? null;
-
-        if (participant.isSharingScreen && participant.screenTrackId) {
-            selectedVideoTrack =
-                allVideoTracks.find((track) => track.id === participant.screenTrackId) ?? selectedVideoTrack;
-        }
+        const screenTrack = participant.screenTrackId
+            ? allVideoTracks.find((track) => track.id === participant.screenTrackId) ?? null
+            : null;
+        const cameraTrack = allVideoTracks.find((track) => track.id !== participant.screenTrackId) ?? null;
+        const selectedVideoTrack = participant.isSharingScreen ? screenTrack || cameraTrack : cameraTrack || screenTrack;
 
         const nextDisplayStream = new MediaStream();
         if (selectedVideoTrack) {
@@ -134,7 +177,15 @@ export const Room = ({
         }
         allAudioTracks.forEach((track) => nextDisplayStream.addTrack(track));
 
+        const nextCameraStream = new MediaStream();
+        if (cameraTrack) {
+            nextCameraStream.addTrack(cameraTrack);
+        } else if (screenTrack) {
+            nextCameraStream.addTrack(screenTrack);
+        }
+
         participant.displayStream = nextDisplayStream;
+        participant.cameraStream = nextCameraStream;
         participantStateRef.current.set(participantId, participant);
     }, []);
 
@@ -151,6 +202,7 @@ export const Room = ({
                       name: participantName || peerNamesRef.current.get(participantId) || "Guest",
                       sourceStream: stream,
                       displayStream: new MediaStream(),
+                      cameraStream: new MediaStream(),
                       isSharingScreen: screenStatusRef.current.get(participantId)?.isSharing ?? false,
                       screenTrackId: screenStatusRef.current.get(participantId)?.trackId ?? null
                   };
@@ -235,6 +287,7 @@ export const Room = ({
         }
 
         try {
+            makingOfferRef.current.set(peerId, true);
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
             socket.emit("offer", {
@@ -244,6 +297,8 @@ export const Room = ({
             });
         } catch (error) {
             console.error("Failed to create offer", error);
+        } finally {
+            makingOfferRef.current.set(peerId, false);
         }
     }, []);
 
@@ -292,8 +347,19 @@ export const Room = ({
             };
 
             peerConnection.ontrack = (event) => {
-                const incomingStream = event.streams[0] || new MediaStream([event.track]);
-                upsertParticipantStream(peerId, incomingStream);
+                const currentStream = remoteStreamsRef.current.get(peerId) || new MediaStream();
+                remoteStreamsRef.current.set(peerId, currentStream);
+
+                if (!currentStream.getTracks().some((track) => track.id === event.track.id)) {
+                    currentStream.addTrack(event.track);
+                }
+
+                event.track.onended = () => {
+                    currentStream.removeTrack(event.track);
+                    upsertParticipantStream(peerId, currentStream);
+                };
+
+                upsertParticipantStream(peerId, currentStream);
             };
 
             peerConnection.onnegotiationneeded = () => {
@@ -305,8 +371,10 @@ export const Room = ({
                 if (state === "failed" || state === "closed" || state === "disconnected") {
                     peerConnection.close();
                     peersRef.current.delete(peerId);
+                    remoteStreamsRef.current.delete(peerId);
                     screenVideoSendersRef.current.delete(peerId);
                     screenAudioSendersRef.current.delete(peerId);
+                    makingOfferRef.current.delete(peerId);
                     removeParticipant(peerId);
                 }
             };
@@ -476,6 +544,7 @@ export const Room = ({
         socketRef.current = socket;
 
         socket.on("connect", () => {
+            socketIdRef.current = socket.id ?? null;
             if (demoRoomId) {
                 socket.emit("join-room", { roomId: demoRoomId, name });
             } else {
@@ -497,6 +566,7 @@ export const Room = ({
                 existingParticipants.forEach((participant) => {
                     peerNamesRef.current.set(participant.id, participant.name);
                     ensurePeerConnection(participant.id, participant.name);
+                    createAndSendOffer(participant.id);
                 });
             }
         );
@@ -506,7 +576,6 @@ export const Room = ({
             ({ participant }: { roomId: string; participant: PeerSummary }) => {
                 peerNamesRef.current.set(participant.id, participant.name);
                 ensurePeerConnection(participant.id, participant.name);
-                createAndSendOffer(participant.id);
             }
         );
 
@@ -519,19 +588,31 @@ export const Room = ({
                 }
 
                 try {
-                    if (peerConnection.signalingState !== "stable") {
+                    const mySocketId = socketIdRef.current || "";
+                    const polite = mySocketId.localeCompare(fromId) > 0;
+                    const makingOffer = makingOfferRef.current.get(fromId) ?? false;
+                    const offerCollision =
+                        sdp.type === "offer" && (makingOffer || peerConnection.signalingState !== "stable");
+
+                    if (offerCollision && !polite) {
+                        return;
+                    }
+
+                    if (offerCollision) {
                         await peerConnection.setLocalDescription({ type: "rollback" });
                     }
 
                     await peerConnection.setRemoteDescription(sdp);
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
+                    if (sdp.type === "offer") {
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
 
-                    socket.emit("answer", {
-                        roomId: currentRoomIdRef.current,
-                        targetId: fromId,
-                        sdp: peerConnection.localDescription
-                    });
+                        socket.emit("answer", {
+                            roomId: currentRoomIdRef.current,
+                            targetId: fromId,
+                            sdp: peerConnection.localDescription
+                        });
+                    }
                 } catch (error) {
                     console.error("Failed to handle offer", error);
                 }
@@ -598,9 +679,11 @@ export const Room = ({
                 peerConnection.close();
             }
             peersRef.current.delete(participantId);
+            remoteStreamsRef.current.delete(participantId);
             screenVideoSendersRef.current.delete(participantId);
             screenAudioSendersRef.current.delete(participantId);
             peerNamesRef.current.delete(participantId);
+            makingOfferRef.current.delete(participantId);
             removeParticipant(participantId);
         });
 
@@ -613,27 +696,63 @@ export const Room = ({
             stopScreenShare();
             peersRef.current.forEach((peerConnection) => peerConnection.close());
             peersRef.current.clear();
+            remoteStreamsRef.current.clear();
             participantStateRef.current.clear();
             screenStatusRef.current.clear();
+            makingOfferRef.current.clear();
             socket.disconnect();
             socketRef.current = null;
         };
     }, [createAndSendOffer, demoRoomId, ensurePeerConnection, name, removeParticipant, stopScreenShare, syncParticipants, updateDisplayedStream]);
 
+    const remoteParticipants = useMemo(
+        () => participants.filter((participant) => participant.id !== socketIdRef.current),
+        [participants]
+    );
+
     const mainParticipant = useMemo(() => {
-        if (participants.length === 0) {
+        if (isScreenSharing && screenPreviewStream) {
+            return {
+                id: socketIdRef.current || "local-screen",
+                name,
+                sourceStream: screenPreviewStream,
+                displayStream: screenPreviewStream,
+                isSharingScreen: true,
+                screenTrackId: screenVideoTrackRef.current?.id ?? null
+            };
+        }
+
+        if (remoteParticipants.length === 0) {
             return null;
         }
-        const sharing = participants.find((participant) => participant.isSharingScreen);
-        return sharing || participants[0];
-    }, [participants]);
+        const sharing = remoteParticipants.find((participant) => participant.isSharingScreen);
+        return sharing || remoteParticipants[0];
+    }, [isScreenSharing, name, remoteParticipants, screenPreviewStream]);
 
     const sideParticipants = useMemo(() => {
-        if (!mainParticipant) {
-            return [];
-        }
-        return participants.filter((participant) => participant.id !== mainParticipant.id);
+        return participants.filter((participant) => participant.id !== mainParticipant?.id);
     }, [mainParticipant, participants]);
+
+    const mainParticipantCameraStream = useMemo(() => {
+        if (!mainParticipant?.isSharingScreen) {
+            return null;
+        }
+
+        const matchingParticipant = participants.find((participant) => participant.id === mainParticipant.id);
+        if (!matchingParticipant) {
+            return null;
+        }
+
+        return matchingParticipant.cameraStream.getVideoTracks().length > 0 ? matchingParticipant.cameraStream : null;
+    }, [mainParticipant, participants]);
+
+    const getSidebarStream = useCallback((participant: ParticipantState) => {
+        if (participant.isSharingScreen && participant.cameraStream.getVideoTracks().length > 0) {
+            return participant.cameraStream;
+        }
+
+        return participant.displayStream;
+    }, []);
 
     return (
         <div
@@ -663,21 +782,16 @@ export const Room = ({
                 }}
             >
                 <div style={{ minHeight: "100%", height: "100%" }}>
-                    {isScreenSharing ? (
-                        <ParticipantVideo stream={screenPreviewStream} label="You (Sharing)" muted={true} prioritized paused={isPlaybackPaused} />
-                    ) : (
-                        <ParticipantVideo
-                            stream={mainParticipant?.displayStream || null}
-                            label={mainParticipant ? `${mainParticipant.name}${mainParticipant.isSharingScreen ? " (Sharing)" : ""}` : "Waiting for participants"}
-                            muted={false}
-                            prioritized={mainParticipant?.isSharingScreen}
-                            paused={isPlaybackPaused}
-                        />
-                    )}
+                    <ParticipantVideo
+                        stream={mainParticipant?.displayStream || null}
+                        label={mainParticipant ? `${mainParticipant.name}${mainParticipant.isSharingScreen ? " (Sharing)" : ""}` : "Waiting for participants"}
+                        prioritized={mainParticipant?.isSharingScreen}
+                        paused={isPlaybackPaused}
+                    />
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                    <div style={{ height: "180px" }}>
+                    <div style={{ width: "100%", aspectRatio: "16 / 9" }}>
                         <div
                             className="video-container"
                             style={{
@@ -691,18 +805,44 @@ export const Room = ({
                                 autoPlay
                                 muted
                                 playsInline
-                                style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000" }}
+                                style={{
+                                    width: "100%",
+                                    height: "100%",
+                                    objectFit: "cover",
+                                    background: "#000",
+                                    transform: "scaleX(-1)"
+                                }}
                             />
                             <div className="badge">You</div>
                         </div>
                     </div>
 
-                    {sideParticipants.map((participant) => (
-                        <div key={participant.id} style={{ height: "180px" }}>
+                    {isScreenSharing && screenPreviewStream && (
+                        <div style={{ width: "100%", aspectRatio: "16 / 9" }}>
                             <ParticipantVideo
-                                stream={participant.displayStream}
+                                stream={screenPreviewStream}
+                                label="Your screen"
+                                prioritized
+                                paused={isPlaybackPaused}
+                            />
+                        </div>
+                    )}
+
+                    {mainParticipant?.isSharingScreen && mainParticipantCameraStream && (
+                        <div style={{ width: "100%", aspectRatio: "16 / 9" }}>
+                            <ParticipantVideo
+                                stream={mainParticipantCameraStream}
+                                label={`${mainParticipant.name} (Camera)`}
+                                paused={isPlaybackPaused}
+                            />
+                        </div>
+                    )}
+
+                    {sideParticipants.map((participant) => (
+                        <div key={participant.id} style={{ width: "100%", aspectRatio: "16 / 9" }}>
+                            <ParticipantVideo
+                                stream={getSidebarStream(participant)}
                                 label={`${participant.name}${participant.isSharingScreen ? " (Sharing)" : ""}`}
-                                muted={false}
                                 prioritized={participant.isSharingScreen}
                                 paused={isPlaybackPaused}
                             />
@@ -720,6 +860,9 @@ export const Room = ({
                     </button>
                 </div>
             </div>
+            {participants.map((participant) => (
+                <ParticipantAudio key={participant.id} stream={participant.displayStream} boost={1.7} />
+            ))}
         </div>
     );
 };
