@@ -1,7 +1,77 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Socket, io } from "socket.io-client";
 
 const URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
+
+type PeerSummary = {
+    id: string;
+    name: string;
+};
+
+type ParticipantState = {
+    id: string;
+    name: string;
+    sourceStream: MediaStream;
+    displayStream: MediaStream;
+    isSharingScreen: boolean;
+    screenTrackId: string | null;
+};
+
+const ParticipantVideo = ({
+    stream,
+    label,
+    muted,
+    prioritized,
+    paused
+}: {
+    stream: MediaStream | null;
+    label: string;
+    muted: boolean;
+    prioritized?: boolean;
+    paused?: boolean;
+}) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    useEffect(() => {
+        if (!videoRef.current) {
+            return;
+        }
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(() => undefined);
+    }, [stream]);
+
+    useEffect(() => {
+        if (!videoRef.current) {
+            return;
+        }
+        if (paused) {
+            videoRef.current.pause();
+            return;
+        }
+        videoRef.current.play().catch(() => undefined);
+    }, [paused]);
+
+    return (
+        <div
+            className="video-container"
+            style={{
+                width: "100%",
+                height: "100%",
+                border: prioritized ? "2px solid var(--success)" : "1px solid var(--border)",
+                borderRadius: "0.75rem"
+            }}
+        >
+            <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted={muted}
+                style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000" }}
+            />
+            <div className="badge">{label}</div>
+        </div>
+    );
+};
 
 export const Room = ({
     name,
@@ -9,43 +79,113 @@ export const Room = ({
     localVideoTrack,
     demoRoomId
 }: {
-    name: string,
-    localAudioTrack: MediaStreamTrack | null,
-    localVideoTrack: MediaStreamTrack | null,
-    demoRoomId?: string,
+    name: string;
+    localAudioTrack: MediaStreamTrack | null;
+    localVideoTrack: MediaStreamTrack | null;
+    demoRoomId?: string;
 }) => {
     const [lobby, setLobby] = useState(true);
-    const [socket, setSocket] = useState<null | Socket>(null);
-    const [sendingPc, setSendingPc] = useState<null | RTCPeerConnection>(null);
-    const [, setReceivingPc] = useState<null | RTCPeerConnection>(null);
-    const [remoteVideoTrack, setRemoteVideoTrack] = useState<MediaStreamTrack | null>(null);
-    const [remoteAudioTrack, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null);
-    const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
-    const [remoteCameraTrack, setRemoteCameraTrack] = useState<MediaStreamTrack | null>(null);
-    const [, setRemoteScreenTrack] = useState<MediaStreamTrack | null>(null);
-    const [isScreenSharing, setIsScreenSharing] = useState(false);
-    const [isFullscreen, setIsFullscreen] = useState(false);
-    const [screenTrack, setScreenTrack] = useState<MediaStreamTrack | null>(null);
-    const [screenAudioTrack, setScreenAudioTrack] = useState<MediaStreamTrack | null>(null);
-    const [remoteIsScreenSharing, setRemoteIsScreenSharing] = useState(false);
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
-    const [mixedAudioTrack, setMixedAudioTrack] = useState<MediaStreamTrack | null>(null);
-    const audioContextRef = useRef<AudioContext | null>(null);
-    const remoteVideoRef = useRef<HTMLVideoElement>(null);
-    const localVideoRef = useRef<HTMLVideoElement>(null);
-    const screenShareRef = useRef<HTMLVideoElement>(null);
-    const sidebarRemoteVideoRef = useRef<HTMLVideoElement>(null);
-    const sidebarRemoteCameraRef = useRef<HTMLVideoElement>(null);
+    const [participants, setParticipants] = useState<ParticipantState[]>([]);
+    const [isScreenSharing, setIsScreenSharing] = useState(false);
+    const [screenPreviewStream, setScreenPreviewStream] = useState<MediaStream | null>(null);
+    const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
+    const [isFullscreen, setIsFullscreen] = useState(false);
+
     const containerRef = useRef<HTMLDivElement>(null);
-    const remoteAudioRef = useRef<HTMLAudioElement>(null);
+    const localPreviewRef = useRef<HTMLVideoElement>(null);
+    const socketRef = useRef<Socket | null>(null);
+    const currentRoomIdRef = useRef<string | null>(null);
 
-    // Keep persistent refs for peer connections (needed for renegotiation)
-    const sendingPcRef = useRef<RTCPeerConnection | null>(null);
-    const receivingPcRef = useRef<RTCPeerConnection | null>(null);
-    const remoteCameraTrackRef = useRef<MediaStreamTrack | null>(null);
+    const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+    const peerNamesRef = useRef<Map<string, string>>(new Map());
+    const participantStateRef = useRef<Map<string, ParticipantState>>(new Map());
+    const screenStatusRef = useRef<Map<string, { isSharing: boolean; trackId: string | null }>>(new Map());
 
-    const toggleFullscreen = async () => {
-        if (!containerRef.current) return;
+    const localStreamRef = useRef<MediaStream>(new MediaStream());
+    const screenStreamRef = useRef<MediaStream | null>(null);
+    const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+    const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
+    const screenVideoSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
+    const screenAudioSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
+
+    const syncParticipants = useCallback(() => {
+        setParticipants(Array.from(participantStateRef.current.values()));
+    }, []);
+
+    const updateDisplayedStream = useCallback((participantId: string) => {
+        const participant = participantStateRef.current.get(participantId);
+        if (!participant) {
+            return;
+        }
+
+        const allVideoTracks = participant.sourceStream.getVideoTracks();
+        const allAudioTracks = participant.sourceStream.getAudioTracks();
+        let selectedVideoTrack: MediaStreamTrack | null = allVideoTracks[0] ?? null;
+
+        if (participant.isSharingScreen && participant.screenTrackId) {
+            selectedVideoTrack =
+                allVideoTracks.find((track) => track.id === participant.screenTrackId) ?? selectedVideoTrack;
+        }
+
+        const nextDisplayStream = new MediaStream();
+        if (selectedVideoTrack) {
+            nextDisplayStream.addTrack(selectedVideoTrack);
+        }
+        allAudioTracks.forEach((track) => nextDisplayStream.addTrack(track));
+
+        participant.displayStream = nextDisplayStream;
+        participantStateRef.current.set(participantId, participant);
+    }, []);
+
+    const upsertParticipantStream = useCallback(
+        (participantId: string, stream: MediaStream, participantName?: string) => {
+            const existing = participantStateRef.current.get(participantId);
+            const nextState: ParticipantState = existing
+                ? {
+                      ...existing,
+                      sourceStream: stream
+                  }
+                : {
+                      id: participantId,
+                      name: participantName || peerNamesRef.current.get(participantId) || "Guest",
+                      sourceStream: stream,
+                      displayStream: new MediaStream(),
+                      isSharingScreen: screenStatusRef.current.get(participantId)?.isSharing ?? false,
+                      screenTrackId: screenStatusRef.current.get(participantId)?.trackId ?? null
+                  };
+
+            participantStateRef.current.set(participantId, nextState);
+            updateDisplayedStream(participantId);
+            syncParticipants();
+        },
+        [syncParticipants, updateDisplayedStream]
+    );
+
+    const removeParticipant = useCallback(
+        (participantId: string) => {
+            participantStateRef.current.delete(participantId);
+            syncParticipants();
+        },
+        [syncParticipants]
+    );
+
+    const emitScreenShareStatus = useCallback(
+        (isSharing: boolean, trackId: string | null) => {
+            const socket = socketRef.current;
+            const roomId = currentRoomIdRef.current;
+            if (!socket || !roomId) {
+                return;
+            }
+            socket.emit("screen-share-status", { roomId, isSharing, trackId });
+        },
+        []
+    );
+
+    const toggleFullscreen = useCallback(async () => {
+        if (!containerRef.current) {
+            return;
+        }
 
         try {
             if (!document.fullscreenElement) {
@@ -56,780 +196,530 @@ export const Room = ({
                 setIsFullscreen(false);
             }
         } catch (error) {
-            console.error("Error toggling fullscreen:", error);
+            console.error("Failed to toggle fullscreen", error);
         }
-    };
+    }, []);
 
-    // Listen for fullscreen changes (e.g., user presses Escape)
+    const setPlaybackState = useCallback((paused: boolean, emit: boolean) => {
+        setIsPlaybackPaused(paused);
+        if (!emit) {
+            return;
+        }
+
+        const socket = socketRef.current;
+        const roomId = currentRoomIdRef.current;
+        if (!socket || !roomId) {
+            return;
+        }
+
+        socket.emit("playback-toggle", {
+            roomId,
+            paused
+        });
+    }, []);
+
+    const togglePlayback = useCallback(() => {
+        setPlaybackState(!isPlaybackPaused, true);
+    }, [isPlaybackPaused, setPlaybackState]);
+
+    const createAndSendOffer = useCallback(async (peerId: string) => {
+        const socket = socketRef.current;
+        const roomId = currentRoomIdRef.current;
+        const peerConnection = peersRef.current.get(peerId);
+        if (!socket || !roomId || !peerConnection) {
+            return;
+        }
+
+        if (peerConnection.signalingState !== "stable") {
+            return;
+        }
+
+        try {
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit("offer", {
+                roomId,
+                targetId: peerId,
+                sdp: peerConnection.localDescription
+            });
+        } catch (error) {
+            console.error("Failed to create offer", error);
+        }
+    }, []);
+
+    const ensurePeerConnection = useCallback(
+        (peerId: string, peerName?: string) => {
+            const existing = peersRef.current.get(peerId);
+            if (existing) {
+                if (peerName) {
+                    peerNamesRef.current.set(peerId, peerName);
+                }
+                return existing;
+            }
+
+            if (peerName) {
+                peerNamesRef.current.set(peerId, peerName);
+            }
+
+            const socket = socketRef.current;
+            const peerConnection = new RTCPeerConnection();
+            peersRef.current.set(peerId, peerConnection);
+
+            localStreamRef.current.getTracks().forEach((track) => {
+                peerConnection.addTrack(track, localStreamRef.current);
+            });
+
+            if (screenStreamRef.current && screenVideoTrackRef.current) {
+                const sender = peerConnection.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
+                screenVideoSendersRef.current.set(peerId, sender);
+            }
+
+            if (screenStreamRef.current && screenAudioTrackRef.current) {
+                const sender = peerConnection.addTrack(screenAudioTrackRef.current, screenStreamRef.current);
+                screenAudioSendersRef.current.set(peerId, sender);
+            }
+
+            peerConnection.onicecandidate = (event) => {
+                if (!event.candidate || !socket || !currentRoomIdRef.current) {
+                    return;
+                }
+
+                socket.emit("ice-candidate", {
+                    roomId: currentRoomIdRef.current,
+                    targetId: peerId,
+                    candidate: event.candidate
+                });
+            };
+
+            peerConnection.ontrack = (event) => {
+                const incomingStream = event.streams[0] || new MediaStream([event.track]);
+                upsertParticipantStream(peerId, incomingStream);
+            };
+
+            peerConnection.onnegotiationneeded = () => {
+                createAndSendOffer(peerId);
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                const state = peerConnection.connectionState;
+                if (state === "failed" || state === "closed" || state === "disconnected") {
+                    peerConnection.close();
+                    peersRef.current.delete(peerId);
+                    screenVideoSendersRef.current.delete(peerId);
+                    screenAudioSendersRef.current.delete(peerId);
+                    removeParticipant(peerId);
+                }
+            };
+
+            return peerConnection;
+        },
+        [removeParticipant, upsertParticipantStream]
+    );
+
+    const stopScreenShare = useCallback(() => {
+        const screenStream = screenStreamRef.current;
+        if (!screenStream) {
+            setScreenPreviewStream(null);
+            setIsScreenSharing(false);
+            return;
+        }
+
+        peersRef.current.forEach((peerConnection, peerId) => {
+            const videoSender = screenVideoSendersRef.current.get(peerId);
+            if (videoSender) {
+                peerConnection.removeTrack(videoSender);
+                screenVideoSendersRef.current.delete(peerId);
+            }
+
+            const audioSender = screenAudioSendersRef.current.get(peerId);
+            if (audioSender) {
+                peerConnection.removeTrack(audioSender);
+                screenAudioSendersRef.current.delete(peerId);
+            }
+
+            createAndSendOffer(peerId);
+        });
+
+        screenStream.getTracks().forEach((track) => track.stop());
+        screenStreamRef.current = null;
+        screenVideoTrackRef.current = null;
+        screenAudioTrackRef.current = null;
+        setScreenPreviewStream(null);
+        setIsScreenSharing(false);
+        emitScreenShareStatus(false, null);
+    }, [createAndSendOffer, emitScreenShareStatus]);
+
+    const startScreenShare = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: true
+            });
+
+            const videoTrack = stream.getVideoTracks()[0] ?? null;
+            const audioTrack = stream.getAudioTracks()[0] ?? null;
+
+            if (!videoTrack) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
+
+            screenStreamRef.current = stream;
+            screenVideoTrackRef.current = videoTrack;
+            screenAudioTrackRef.current = audioTrack;
+            setScreenPreviewStream(new MediaStream([videoTrack]));
+            setIsScreenSharing(true);
+
+            peersRef.current.forEach((peerConnection, peerId) => {
+                const videoSender = peerConnection.addTrack(videoTrack, stream);
+                screenVideoSendersRef.current.set(peerId, videoSender);
+
+                if (audioTrack) {
+                    const audioSender = peerConnection.addTrack(audioTrack, stream);
+                    screenAudioSendersRef.current.set(peerId, audioSender);
+                }
+
+                createAndSendOffer(peerId);
+            });
+
+            emitScreenShareStatus(true, videoTrack.id);
+            videoTrack.onended = () => {
+                stopScreenShare();
+            };
+        } catch (error) {
+            console.error("Failed to start screen share", error);
+        }
+    }, [createAndSendOffer, emitScreenShareStatus, stopScreenShare]);
+
+    const toggleScreenShare = useCallback(() => {
+        if (isScreenSharing) {
+            stopScreenShare();
+            return;
+        }
+        startScreenShare();
+    }, [isScreenSharing, startScreenShare, stopScreenShare]);
+
     useEffect(() => {
         const handleFullscreenChange = () => {
             setIsFullscreen(!!document.fullscreenElement);
         };
 
-        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        document.addEventListener("fullscreenchange", handleFullscreenChange);
         return () => {
-            document.removeEventListener('fullscreenchange', handleFullscreenChange);
+            document.removeEventListener("fullscreenchange", handleFullscreenChange);
         };
     }, []);
 
-    // Update local video stream (always show camera)
     useEffect(() => {
-        if (localVideoRef.current && localVideoTrack) {
-            localVideoRef.current.srcObject = new MediaStream([localVideoTrack]);
-            localVideoRef.current.play().catch(console.error);
+        const nextLocalStream = new MediaStream();
+        if (localVideoTrack) {
+            nextLocalStream.addTrack(localVideoTrack);
         }
-    }, [localVideoTrack, isFullscreen]);
+        if (localAudioTrack) {
+            nextLocalStream.addTrack(localAudioTrack);
+        }
+        localStreamRef.current = nextLocalStream;
 
-    // Update screen share preview (for the person sharing)
-    useEffect(() => {
-        if (screenShareRef.current && screenTrack) {
-            screenShareRef.current.srcObject = new MediaStream([screenTrack]);
-            screenShareRef.current.play().catch(console.error);
+        if (localPreviewRef.current) {
+            localPreviewRef.current.srcObject = new MediaStream(localVideoTrack ? [localVideoTrack] : []);
+            localPreviewRef.current.play().catch(() => undefined);
         }
-    }, [screenTrack, isFullscreen]);
 
-    // Update remote video when track changes
-    useEffect(() => {
-        if (remoteVideoRef.current && remoteMediaStream) {
-            remoteVideoRef.current.srcObject = remoteMediaStream;
-            remoteVideoRef.current.play().catch(console.error);
-        }
-    }, [remoteMediaStream, remoteVideoTrack, remoteAudioTrack, isFullscreen, remoteIsScreenSharing]);
+        peersRef.current.forEach((peerConnection, peerId) => {
+            const senders = peerConnection.getSenders();
+            const cameraSender = senders.find(
+                (sender) =>
+                    sender.track?.kind === "video" &&
+                    sender.track.id !== screenVideoTrackRef.current?.id
+            );
+            const micSender = senders.find(
+                (sender) =>
+                    sender.track?.kind === "audio" &&
+                    sender.track.id !== screenAudioTrackRef.current?.id
+            );
 
-    // Update sidebar remote video (for both host sharing and guest viewing)
-    useEffect(() => {
-        if (sidebarRemoteVideoRef.current && remoteMediaStream && isScreenSharing && isFullscreen) {
-            sidebarRemoteVideoRef.current.srcObject = remoteMediaStream;
-            sidebarRemoteVideoRef.current.play().catch(console.error);
-        }
-    }, [remoteMediaStream, isScreenSharing, isFullscreen]);
+            if (localVideoTrack) {
+                if (cameraSender) {
+                    cameraSender.replaceTrack(localVideoTrack).catch(() => undefined);
+                } else {
+                    peerConnection.addTrack(localVideoTrack, localStreamRef.current);
+                }
+            }
 
-    // Update sidebar with remote camera when viewing their screen share
-    useEffect(() => {
-        if (sidebarRemoteCameraRef.current && remoteCameraTrack && remoteIsScreenSharing && isFullscreen) {
-            sidebarRemoteCameraRef.current.srcObject = new MediaStream([remoteCameraTrack]);
-            sidebarRemoteCameraRef.current.play().catch(console.error);
-        }
-    }, [remoteCameraTrack, remoteIsScreenSharing, isFullscreen]);
+            if (localAudioTrack) {
+                if (micSender) {
+                    micSender.replaceTrack(localAudioTrack).catch(() => undefined);
+                } else {
+                    peerConnection.addTrack(localAudioTrack, localStreamRef.current);
+                }
+            }
 
-    // Dedicated audio handling
+            createAndSendOffer(peerId);
+        });
+    }, [createAndSendOffer, localAudioTrack, localVideoTrack]);
+
     useEffect(() => {
-        if (remoteAudioRef.current && remoteAudioTrack) {
-            remoteAudioRef.current.srcObject = new MediaStream([remoteAudioTrack]);
-            remoteAudioRef.current.play().catch(console.error);
+        if (!localPreviewRef.current) {
+            return;
         }
-    }, [remoteAudioTrack]);
+
+        if (isPlaybackPaused) {
+            localPreviewRef.current.pause();
+            return;
+        }
+
+        localPreviewRef.current.play().catch(() => undefined);
+    }, [isPlaybackPaused]);
 
     useEffect(() => {
         const socket = io(URL);
+        socketRef.current = socket;
 
-        socket.on('connect', () => {
-            console.log("connected to socket");
+        socket.on("connect", () => {
             if (demoRoomId) {
-                console.log("joining room " + demoRoomId);
                 socket.emit("join-room", { roomId: demoRoomId, name });
             } else {
-                console.log("creating room");
                 socket.emit("create-room", { name });
             }
         });
 
-        socket.on("room-created", ({ roomId }) => {
-            console.log("Current room id is " + roomId);
+        socket.on("room-created", ({ roomId }: { roomId: string }) => {
             setCurrentRoomId(roomId);
+            currentRoomIdRef.current = roomId;
         });
 
-        socket.on("room-join-error", ({ message }) => {
-            alert(message);
-            // Ideally handle error state to redirect back to landing
-            setLobby(true);
-        });
-
-        socket.on('send-offer', async ({ roomId }) => {
-            console.log("sending offer");
-            setLobby(false);
-            setCurrentRoomId(roomId);
-            const pc = new RTCPeerConnection();
-
-            setSendingPc(pc);
-            sendingPcRef.current = pc;
-
-            if (localVideoTrack) {
-                console.error("added tack");
-                console.log(localVideoTrack)
-                pc.addTrack(localVideoTrack)
+        socket.on(
+            "room-joined",
+            ({ roomId, participants: existingParticipants }: { roomId: string; participants: PeerSummary[] }) => {
+                setLobby(false);
+                setCurrentRoomId(roomId);
+                currentRoomIdRef.current = roomId;
+                existingParticipants.forEach((participant) => {
+                    peerNamesRef.current.set(participant.id, participant.name);
+                    ensurePeerConnection(participant.id, participant.name);
+                });
             }
-            if (localAudioTrack) {
-                console.error("added tack");
-                console.log(localAudioTrack)
-                pc.addTrack(localAudioTrack)
+        );
+
+        socket.on(
+            "participant-joined",
+            ({ participant }: { roomId: string; participant: PeerSummary }) => {
+                peerNamesRef.current.set(participant.id, participant.name);
+                ensurePeerConnection(participant.id, participant.name);
+                createAndSendOffer(participant.id);
             }
+        );
 
-            pc.onicecandidate = async (e) => {
-                console.log("receiving ice candidate locally");
-                if (e.candidate) {
-                    socket.emit("add-ice-candidate", {
-                        candidate: e.candidate,
-                        type: "sender",
-                        roomId
-                    })
-                }
-            }
-
-            pc.onnegotiationneeded = async () => {
-                console.log("on negotiation neeeded, sending offer");
-                const sdp = await pc.createOffer();
-                //@ts-ignore
-                pc.setLocalDescription(sdp)
-                socket.emit("offer", {
-                    sdp,
-                    roomId
-                })
-            }
-
-            pc.ontrack = (event) => {
-                const track = event.track;
-                console.log("ontrack received:", track.kind, track.id);
-
-                // Initialize remote media stream if not exists
-                // Note: We might want to use a state setter or ref to ensure we don't recreate it unnecessarily
-                // But for now, we rely on the stream construction logic in the handler
-                let stream = remoteVideoRef.current?.srcObject as MediaStream;
-                if (!stream) {
-                    stream = new MediaStream();
-                    setRemoteMediaStream(stream);
+        socket.on(
+            "offer",
+            async ({ fromId, sdp }: { roomId: string; fromId: string; sdp: RTCSessionDescriptionInit }) => {
+                const peerConnection = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
+                if (!peerConnection) {
+                    return;
                 }
 
-                if (track.kind === 'video') {
-                    const existingVideoTracks = stream.getVideoTracks();
-
-                    if (existingVideoTracks.length === 0) {
-                        // First video track - this is the camera
-                        console.log("First video track (camera):", track.id);
-                        setRemoteCameraTrack(track);
-                        remoteCameraTrackRef.current = track;
-                        setRemoteVideoTrack(track);
-                        stream.addTrack(track);
-                    } else {
-                        // Second video track - this is the screen share
-                        console.log("Second video track (screen):", track.id);
-                        setRemoteScreenTrack(track);
-                        // Replace main view with screen share, keep camera in sidebar
-                        existingVideoTracks.forEach(t => stream.removeTrack(t));
-                        stream.addTrack(track);
-                        setRemoteVideoTrack(track);
+                try {
+                    if (peerConnection.signalingState !== "stable") {
+                        await peerConnection.setLocalDescription({ type: "rollback" });
                     }
 
-                    // Listen for track ending (when host stops sharing)
-                    track.onended = () => {
-                        console.log("Track ended:", track.kind, track.id);
-                        if (track.kind === 'video') {
-                            // If screen share track ended, switch back to camera
-                            stream.removeTrack(track);
-                            const cameraTrack = remoteCameraTrackRef.current;
-                            if (cameraTrack) {
-                                console.log("Switching back to camera:", cameraTrack.id);
-                                stream.addTrack(cameraTrack);
-                                setRemoteVideoTrack(cameraTrack);
-                                setRemoteScreenTrack(null);
-                            }
-                        }
-                    };
-                } else if (track.kind === 'audio') {
-                    setRemoteAudioTrack(track);
-                    stream.addTrack(track);
-                }
+                    await peerConnection.setRemoteDescription(sdp);
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
 
-                if (remoteVideoRef.current) {
-                    remoteVideoRef.current.srcObject = stream;
-                    remoteVideoRef.current.play().catch(console.error);
-                }
-            };
-
-        });
-
-        socket.on("offer", async ({ roomId, sdp: remoteSdp }) => {
-            console.log("received offer");
-            setLobby(false);
-            setCurrentRoomId(roomId);
-
-            // Reuse existing receiving PC if present (renegotiation), else create new one
-            let pc = receivingPcRef.current;
-            if (!pc) {
-                pc = new RTCPeerConnection();
-                receivingPcRef.current = pc;
-                setReceivingPc(pc);
-
-                if (localVideoTrack) {
-                    pc.addTrack(localVideoTrack);
-                }
-                if (localAudioTrack) {
-                    pc.addTrack(localAudioTrack);
-                }
-
-                const stream = new MediaStream();
-                if (remoteVideoRef.current) {
-                    remoteVideoRef.current.srcObject = stream;
-                }
-                setRemoteMediaStream(stream);
-
-                // Handle incoming tracks - camera, audio, and screen share
-                pc.ontrack = (event) => {
-                    const track = event.track;
-                    console.log("ontrack received:", track.kind, track.id);
-
-                    if (track.kind === 'video') {
-                        const existingVideoTracks = stream.getVideoTracks();
-
-                        if (existingVideoTracks.length === 0) {
-                            // First video track - this is the camera
-                            console.log("First video track (camera):", track.id);
-                            setRemoteCameraTrack(track);
-                            remoteCameraTrackRef.current = track;
-                            setRemoteVideoTrack(track);
-                            stream.addTrack(track);
-                        } else {
-                            // Second video track - this is the screen share
-                            console.log("Second video track (screen):", track.id);
-                            setRemoteScreenTrack(track);
-                            // Replace main view with screen share, keep camera in sidebar
-                            existingVideoTracks.forEach(t => stream.removeTrack(t));
-                            stream.addTrack(track);
-                            setRemoteVideoTrack(track);
-                        }
-
-                        // Listen for track ending (when host stops sharing)
-                        track.onended = () => {
-                            console.log("Track ended:", track.kind, track.id);
-                            if (track.kind === 'video') {
-                                // If screen share track ended, switch back to camera
-                                stream.removeTrack(track);
-                                const cameraTrack = remoteCameraTrackRef.current;
-                                if (cameraTrack) {
-                                    console.log("Switching back to camera:", cameraTrack.id);
-                                    stream.addTrack(cameraTrack);
-                                    setRemoteVideoTrack(cameraTrack);
-                                    setRemoteScreenTrack(null);
-                                }
-                            }
-                        };
-                    } else if (track.kind === 'audio') {
-                        setRemoteAudioTrack(track);
-                        stream.addTrack(track);
-                    }
-
-                    if (remoteVideoRef.current) {
-                        remoteVideoRef.current.srcObject = stream;
-                        remoteVideoRef.current.play().catch(console.error);
-                    }
-                };
-
-                pc.onicecandidate = async (e) => {
-                    if (!e.candidate) return;
-                    console.log("on ice candidate on receiving side");
-                    socket.emit("add-ice-candidate", {
-                        candidate: e.candidate,
-                        type: "receiver",
-                        roomId
+                    socket.emit("answer", {
+                        roomId: currentRoomIdRef.current,
+                        targetId: fromId,
+                        sdp: peerConnection.localDescription
                     });
-                };
-
-                //@ts-ignore
-                window.pcr = pc;
+                } catch (error) {
+                    console.error("Failed to handle offer", error);
+                }
             }
+        );
 
-            await pc.setRemoteDescription(remoteSdp);
-            const sdp = await pc.createAnswer();
-            //@ts-ignore
-            await pc.setLocalDescription(sdp);
+        socket.on(
+            "answer",
+            async ({ fromId, sdp }: { roomId: string; fromId: string; sdp: RTCSessionDescriptionInit }) => {
+                const peerConnection = peersRef.current.get(fromId);
+                if (!peerConnection) {
+                    return;
+                }
+                try {
+                    await peerConnection.setRemoteDescription(sdp);
+                } catch (error) {
+                    console.error("Failed to handle answer", error);
+                }
+            }
+        );
 
-            socket.emit("answer", { roomId, sdp });
+        socket.on(
+            "ice-candidate",
+            async ({ fromId, candidate }: { roomId: string; fromId: string; candidate: RTCIceCandidateInit }) => {
+                const peerConnection = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
+                if (!peerConnection || !candidate) {
+                    return;
+                }
+
+                try {
+                    await peerConnection.addIceCandidate(candidate);
+                } catch (error) {
+                    console.error("Failed to add ICE candidate", error);
+                }
+            }
+        );
+
+        socket.on(
+            "screen-share-status",
+            ({ senderId, isSharing, trackId }: { roomId: string; senderId: string; isSharing: boolean; trackId: string | null }) => {
+                screenStatusRef.current.set(senderId, { isSharing, trackId });
+                const participant = participantStateRef.current.get(senderId);
+                if (!participant) {
+                    return;
+                }
+                participant.isSharingScreen = isSharing;
+                participant.screenTrackId = trackId;
+                participantStateRef.current.set(senderId, participant);
+                updateDisplayedStream(senderId);
+                syncParticipants();
+            }
+        );
+
+        socket.on(
+            "playback-toggle",
+            ({ paused }: { roomId: string; senderId: string; paused: boolean }) => {
+                setPlaybackState(paused, false);
+            }
+        );
+
+        socket.on("participant-left", ({ participantId }: { roomId: string; participantId: string }) => {
+            const peerConnection = peersRef.current.get(participantId);
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            peersRef.current.delete(participantId);
+            screenVideoSendersRef.current.delete(participantId);
+            screenAudioSendersRef.current.delete(participantId);
+            peerNamesRef.current.delete(participantId);
+            removeParticipant(participantId);
         });
 
-        socket.on("answer", ({ sdp: remoteSdp }) => {
-            setLobby(false);
-            setSendingPc(pc => {
-                pc?.setRemoteDescription(remoteSdp)
-                return pc;
-            });
-            console.log("loop closed");
-        })
-
-        socket.on("lobby", () => {
+        socket.on("room-join-error", ({ message }: { message: string }) => {
+            alert(message);
             setLobby(true);
-        })
+        });
 
-        socket.on("add-ice-candidate", ({ candidate, type }) => {
-            console.log("add ice candidate from remote");
-            console.log({ candidate, type })
-            if (type == "sender") {
-                setReceivingPc(pc => {
-                    if (!pc) {
-                        console.error("receicng pc nout found")
-                    } else {
-                        console.error(pc.ontrack)
-                    }
-                    pc?.addIceCandidate(candidate)
-                    return pc;
-                });
-            } else {
-                setSendingPc(pc => {
-                    if (!pc) {
-                        console.error("sending pc nout found")
-                    } else {
-                        // console.error(pc.ontrack)
-                    }
-                    pc?.addIceCandidate(candidate)
-                    return pc;
-                });
-            }
-        })
-
-        // Listen for remote screen share status
-        socket.on("screen-share-status", ({ isSharing }) => {
-            console.log("Remote screen share status changed:", isSharing);
-            setRemoteIsScreenSharing(isSharing);
-
-            // When remote stops sharing, switch back to camera in main view
-            if (!isSharing) {
-                setTimeout(() => {
-                    const stream = remoteVideoRef.current?.srcObject as MediaStream;
-                    const cameraTrack = remoteCameraTrackRef.current;
-
-                    if (stream && cameraTrack) {
-                        console.log("Switching back to camera after remote stopped sharing");
-                        const videoTracks = stream.getVideoTracks();
-                        console.log("Current video tracks:", videoTracks.length);
-
-                        // Remove all video tracks
-                        videoTracks.forEach(t => {
-                            console.log("Removing track:", t.id);
-                            stream.removeTrack(t);
-                        });
-
-                        // Add camera track back
-                        console.log("Adding camera track back:", cameraTrack.id);
-                        stream.addTrack(cameraTrack);
-                        setRemoteVideoTrack(cameraTrack);
-
-                        // Force video element to refresh
-                        if (remoteVideoRef.current) {
-                            remoteVideoRef.current.srcObject = stream;
-                            remoteVideoRef.current.play().catch(console.error);
-                        }
-                    } else {
-                        console.log("Stream or camera track not found", { stream: !!stream, cameraTrack: !!cameraTrack });
-                    }
-                }, 500);
-            }
-        })
-
-        setSocket(socket)
-    }, [name])
-
-    const startScreenShare = async () => {
-        try {
-            const screenStream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
-                audio: true
-            });
-
-            const screenVideoTrack = screenStream.getVideoTracks()[0];
-            const screenAudio = screenStream.getAudioTracks()[0];
-
-            setScreenTrack(screenVideoTrack);
-
-            if (sendingPc) {
-                // Add screen share as a NEW track (don't replace camera)
-                // This triggers renegotiation and sends both camera and screen
-                sendingPc.addTrack(screenVideoTrack, screenStream);
-
-                // If screen has audio, replace the audio track so guest can hear tab audio
-                if (screenAudio) {
-                    setScreenAudioTrack(screenAudio);
-                    const audioSender = sendingPc.getSenders().find(
-                        sender => sender.track?.kind === 'audio'
-                    );
-                    if (audioSender) {
-                        await audioSender.replaceTrack(screenAudio);
-                    }
-                }
-
-                // Mix microphone and screen audio
-                if (localAudioTrack && screenAudio) {
-                    const audioContext = new AudioContext();
-                    audioContextRef.current = audioContext;
-
-                    const destination = audioContext.createMediaStreamDestination();
-                    const localAudioSource = audioContext.createMediaStreamSource(new MediaStream([localAudioTrack]));
-                    const screenAudioSource = audioContext.createMediaStreamSource(new MediaStream([screenAudio]));
-
-                    // Create gain nodes to boost microphone volume
-                    const micGain = audioContext.createGain();
-                    const screenGain = audioContext.createGain();
-
-                    // Boost microphone volume (3x louder)
-                    micGain.gain.value = 3.0;
-                    // Keep screen audio at normal level
-                    screenGain.gain.value = 1.0;
-
-                    localAudioSource.connect(micGain);
-                    micGain.connect(destination);
-
-                    screenAudioSource.connect(screenGain);
-                    screenGain.connect(destination);
-
-                    const mixedTrack = destination.stream.getAudioTracks()[0];
-                    setMixedAudioTrack(mixedTrack);
-
-                    const audioSender = sendingPc.getSenders().find(
-                        sender => sender.track?.kind === 'audio'
-                    );
-                    if (audioSender) {
-                        await audioSender.replaceTrack(mixedTrack);
-                    }
-                }
-            }
-
-            setIsScreenSharing(true);
-
-            if (socket && currentRoomId) {
-                socket.emit("screen-share-status", { isSharing: true, roomId: currentRoomId });
-            }
-
-            screenVideoTrack.onended = () => {
-                stopScreenShare();
-            };
-        } catch (error) {
-            console.error("Error starting screen share:", error);
-        }
-    };
-
-    const stopScreenShare = async () => {
-        if (sendingPc && screenTrack) {
-            // Remove the screen share track
-            const screenSender = sendingPc.getSenders().find(
-                sender => sender.track === screenTrack
-            );
-            if (screenSender) {
-                sendingPc.removeTrack(screenSender);
-            }
-        }
-
-        if (screenTrack) {
-            screenTrack.stop();
-        }
-        if (screenAudioTrack) {
-            screenAudioTrack.stop();
-        }
-        if (mixedAudioTrack) {
-            mixedAudioTrack.stop();
-        }
-        if (audioContextRef.current) {
-            audioContextRef.current.close();
-            audioContextRef.current = null;
-        }
-
-        if (sendingPc) {
-            // Replace back with mic audio track
-            if (localAudioTrack) {
-                const audioSender = sendingPc.getSenders().find(
-                    sender => sender.track?.kind === 'audio'
-                );
-                if (audioSender) {
-                    await audioSender.replaceTrack(localAudioTrack);
-                }
-            }
-        }
-
-        setScreenTrack(null);
-        setScreenAudioTrack(null);
-        setMixedAudioTrack(null);
-        setIsScreenSharing(false);
-
-        if (socket && currentRoomId) {
-            socket.emit("screen-share-status", { isSharing: false, roomId: currentRoomId });
-        }
-    };
-
-    const toggleScreenShare = () => {
-        if (isScreenSharing) {
+        return () => {
             stopScreenShare();
-        } else {
-            startScreenShare();
+            peersRef.current.forEach((peerConnection) => peerConnection.close());
+            peersRef.current.clear();
+            participantStateRef.current.clear();
+            screenStatusRef.current.clear();
+            socket.disconnect();
+            socketRef.current = null;
+        };
+    }, [createAndSendOffer, demoRoomId, ensurePeerConnection, name, removeParticipant, stopScreenShare, syncParticipants, updateDisplayedStream]);
+
+    const mainParticipant = useMemo(() => {
+        if (participants.length === 0) {
+            return null;
         }
-    };
+        const sharing = participants.find((participant) => participant.isSharingScreen);
+        return sharing || participants[0];
+    }, [participants]);
+
+    const sideParticipants = useMemo(() => {
+        if (!mainParticipant) {
+            return [];
+        }
+        return participants.filter((participant) => participant.id !== mainParticipant.id);
+    }, [mainParticipant, participants]);
 
     return (
         <div
             ref={containerRef}
-            className={isFullscreen ? "fullscreen-container" : ""}
             style={{
-                backgroundColor: isFullscreen ? '#000' : 'var(--bg-main)',
-                width: isFullscreen ? '100vw' : '100%',
-                height: isFullscreen ? '100vh' : '100vh',
-                position: isFullscreen ? 'fixed' : 'relative',
-                top: 0,
-                left: 0,
-                display: 'flex',
-                flexDirection: isFullscreen ? 'row' : 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                zIndex: isFullscreen ? 9999 : 1
+                minHeight: isFullscreen ? "100vh" : "100vh",
+                backgroundColor: isFullscreen ? "#000" : "var(--bg-main)",
+                padding: "1.5rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "1rem"
             }}
         >
-            {!isFullscreen && (
-                <div style={{ marginBottom: "1rem", textAlign: "center" }}>
-                    <h2 style={{ fontSize: "1.5rem", fontWeight: "600" }}>Hi, {name}</h2>
-                    {lobby && !currentRoomId && <p style={{ color: "var(--text-muted)" }}>Generating room...</p>}
-                    {lobby && currentRoomId && (
-                        <div>
-                            <p style={{ color: "var(--text-muted)", marginBottom: "10px" }}>Waiting for someone to join...</p>
-                            <div style={{
-                                background: "#f1f5f9",
-                                padding: "10px 20px",
-                                borderRadius: "8px",
-                                display: "inline-block",
-                                border: "1px solid #e2e8f0"
-                            }}>
-                                <span style={{ fontWeight: "600", marginRight: "10px" }}>Room ID:</span>
-                                <span style={{ fontFamily: "monospace", fontSize: "1.2rem" }}>{currentRoomId}</span>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {/* Main video container */}
-            <div style={{
-                position: 'relative',
-                display: 'flex',
-                width: isFullscreen ? '100%' : 'auto',
-                height: isFullscreen ? '100%' : 'auto',
-                gap: isFullscreen ? '0' : '20px',
-                alignItems: !isFullscreen ? 'flex-start' : 'stretch'
-            }}>
-                {/* Main view */}
-                <div className={!isFullscreen ? "video-container" : ""} style={{
-                    position: 'relative',
-                    width: isFullscreen ? 'calc(100% - 240px)' : '800px',
-                    height: isFullscreen ? '100%' : '500px',
-                    borderRadius: isFullscreen ? '0' : '1rem',
-                    overflow: 'hidden',
-                    backgroundColor: '#000',
-                    boxShadow: isFullscreen ? 'none' : 'var(--shadow-lg)'
-                }}>
-                    {isScreenSharing ? (
-                        <video
-                            autoPlay
-                            playsInline
-                            muted
-                            ref={screenShareRef}
-                            onDoubleClick={toggleFullscreen}
-                            style={{
-                                width: '100%',
-                                height: '100%',
-                                cursor: 'pointer',
-                                objectFit: isFullscreen ? 'contain' : 'cover'
-                            }}
-                        />
-                    ) : (
-                        <video
-                            autoPlay
-                            playsInline
-                            muted
-                            ref={remoteVideoRef}
-                            onDoubleClick={toggleFullscreen}
-                            style={{
-                                width: '100%',
-                                height: '100%',
-                                cursor: 'pointer',
-                                objectFit: isFullscreen ? 'contain' : 'cover'
-                            }}
-                        />
-                    )}
-
-                    {!lobby && !isFullscreen && (
-                        <button
-                            className="btn"
-                            onClick={toggleFullscreen}
-                            style={{
-                                position: 'absolute',
-                                bottom: '1rem',
-                                right: '1rem',
-                                background: 'rgba(0, 0, 0, 0.6)',
-                                color: 'white',
-                                padding: '0.5rem',
-                                borderRadius: '0.5rem',
-                                backdropFilter: 'blur(4px)'
-                            }}
-                            title="Enter Fullscreen"
-                        >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>
-                        </button>
-                    )}
-                </div>
-
-                {/* Side panel */}
-                <div style={{
-                    width: isFullscreen ? '240px' : '300px',
-                    height: isFullscreen ? '100%' : '500px',
-                    backgroundColor: isFullscreen ? '#111' : 'transparent',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    padding: isFullscreen ? '1rem' : '0',
-                    borderLeft: isFullscreen ? '1px solid #333' : 'none',
-                    gap: '1rem',
-                    overflowY: 'auto'
-                }}>
-                    {/* Local video (your camera) - always visible in fullscreen */}
-                    {(isFullscreen || !isFullscreen) && (
-                        <div className={!isFullscreen ? "video-container" : ""} style={{
-                            position: 'relative',
-                            borderRadius: '0.75rem',
-                            overflow: 'hidden',
-                            border: isFullscreen ? (isScreenSharing ? '2px solid var(--success)' : '1px solid #333') : 'none',
-                            height: isFullscreen ? '150px' : '200px',
-                            flexShrink: 0
-                        }}>
-                            <video
-                                autoPlay
-                                muted
-                                playsInline
-                                ref={localVideoRef}
-                                style={{
-                                    width: '100%',
-                                    height: '100%',
-                                    objectFit: 'cover',
-                                    backgroundColor: '#000',
-                                    display: 'block'
-                                }}
-                            />
-                            <div className="badge">
-                                You {isScreenSharing && '(Sharing)'}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Remote video in sidebar */}
-                    {isFullscreen && isScreenSharing && (
-                        <div style={{
-                            position: 'relative',
-                            borderRadius: '0.75rem',
-                            overflow: 'hidden',
-                            border: '1px solid #333',
-                            height: '150px',
-                            flexShrink: 0
-                        }}>
-                            <video
-                                autoPlay
-                                playsInline
-                                muted
-                                ref={sidebarRemoteVideoRef}
-                                style={{
-                                    width: '100%',
-                                    height: '100%',
-                                    objectFit: 'cover',
-                                    backgroundColor: '#000',
-                                    display: 'block'
-                                }}
-                            />
-                            <div style={{
-                                position: 'absolute',
-                                bottom: '0.5rem',
-                                left: '0.5rem',
-                                background: 'rgba(0,0,0,0.6)',
-                                color: 'white',
-                                padding: '0.25rem 0.5rem',
-                                borderRadius: '0.25rem',
-                                fontSize: '0.75rem'
-                            }}>
-                                Guest
-                            </div>
-                        </div>
-                    )}
-
-                    {isFullscreen && remoteIsScreenSharing && !isScreenSharing && (
-                        <div style={{
-                            position: 'relative',
-                            borderRadius: '0.75rem',
-                            overflow: 'hidden',
-                            border: '2px solid var(--success)',
-                            height: '150px',
-                            flexShrink: 0
-                        }}>
-                            <video
-                                autoPlay
-                                playsInline
-                                ref={sidebarRemoteCameraRef}
-                                style={{
-                                    width: '100%',
-                                    height: '100%',
-                                    objectFit: 'cover',
-                                    backgroundColor: '#000',
-                                    display: 'block'
-                                }}
-                            />
-                            <div style={{
-                                position: 'absolute',
-                                bottom: '0.5rem',
-                                left: '0.5rem',
-                                background: 'rgba(0,0,0,0.6)',
-                                color: 'white',
-                                padding: '0.25rem 0.5rem',
-                                borderRadius: '0.25rem',
-                                fontSize: '0.75rem'
-                            }}>
-                                Host (Sharing)
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Controls in sidebar (fullscreen mode) */}
-                    {isFullscreen && (
-                        <div style={{
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '0.75rem',
-                            marginTop: 'auto'
-                        }}>
-                            <button
-                                className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"}
-                                onClick={toggleScreenShare}
-                                style={{ width: '100%' }}
-                            >
-                                {isScreenSharing ? 'Stop Share' : 'Share Screen'}
-                            </button>
-                            <button
-                                className="btn btn-secondary"
-                                onClick={toggleFullscreen}
-                                style={{ width: '100%', background: '#333', color: 'white', border: '1px solid #444' }}
-                            >
-                                Exit Fullscreen
-                            </button>
-                        </div>
-                    )}
-                </div>
+            <div style={{ textAlign: "center" }}>
+                <h2 style={{ fontSize: "1.4rem", fontWeight: 700 }}>Hi, {name}</h2>
+                {lobby && !currentRoomId && <p style={{ color: "var(--text-muted)" }}>Generating room...</p>}
+                {lobby && currentRoomId && <p style={{ color: "var(--text-muted)" }}>Waiting for others to join... Room ID: {currentRoomId}</p>}
+                {!lobby && currentRoomId && <p style={{ color: "var(--text-muted)" }}>Room ID: {currentRoomId}</p>}
             </div>
 
-            {/* Controls bar (non-fullscreen mode) */}
-            {!lobby && !isFullscreen && (
-                <div style={{
-                    marginTop: '1.5rem',
-                    display: 'flex',
-                    gap: '1rem'
-                }}>
-                    <button
-                        className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"}
-                        onClick={toggleScreenShare}
-                        style={{ minWidth: '150px' }}
-                    >
-                        {isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
-                    </button>
-                    {/* Fullscreen button is also available on the video hover, but keeping this for accessibility */}
+            <div
+                style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) 280px",
+                    gap: "1rem",
+                    minHeight: "70vh"
+                }}
+            >
+                <div style={{ minHeight: "100%", height: "100%" }}>
+                    {isScreenSharing ? (
+                        <ParticipantVideo stream={screenPreviewStream} label="You (Sharing)" muted={true} prioritized paused={isPlaybackPaused} />
+                    ) : (
+                        <ParticipantVideo
+                            stream={mainParticipant?.displayStream || null}
+                            label={mainParticipant ? `${mainParticipant.name}${mainParticipant.isSharingScreen ? " (Sharing)" : ""}` : "Waiting for participants"}
+                            muted={false}
+                            prioritized={mainParticipant?.isSharingScreen}
+                            paused={isPlaybackPaused}
+                        />
+                    )}
                 </div>
-            )}
-            <audio ref={remoteAudioRef} autoPlay />
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                    <div style={{ height: "180px" }}>
+                        <div
+                            className="video-container"
+                            style={{
+                                borderRadius: "0.75rem",
+                                border: isScreenSharing ? "2px solid var(--success)" : "1px solid var(--border)",
+                                height: "100%"
+                            }}
+                        >
+                            <video
+                                ref={localPreviewRef}
+                                autoPlay
+                                muted
+                                playsInline
+                                style={{ width: "100%", height: "100%", objectFit: "cover", background: "#000" }}
+                            />
+                            <div className="badge">You</div>
+                        </div>
+                    </div>
+
+                    {sideParticipants.map((participant) => (
+                        <div key={participant.id} style={{ height: "180px" }}>
+                            <ParticipantVideo
+                                stream={participant.displayStream}
+                                label={`${participant.name}${participant.isSharingScreen ? " (Sharing)" : ""}`}
+                                muted={false}
+                                prioritized={participant.isSharingScreen}
+                                paused={isPlaybackPaused}
+                            />
+                        </div>
+                    ))}
+
+                    <button className="btn btn-secondary" onClick={togglePlayback} disabled={lobby}>
+                        {isPlaybackPaused ? "Play" : "Pause"}
+                    </button>
+                    <button className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"} onClick={toggleScreenShare} disabled={lobby}>
+                        {isScreenSharing ? "Stop Sharing" : "Share Screen"}
+                    </button>
+                    <button className="btn btn-secondary" onClick={toggleFullscreen} disabled={lobby}>
+                        {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                    </button>
+                </div>
+            </div>
         </div>
     );
-}
+};
