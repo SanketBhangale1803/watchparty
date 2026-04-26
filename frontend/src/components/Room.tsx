@@ -88,7 +88,7 @@ const ParticipantVideo = ({
 // ---------------------------------------------------------------------------
 const ParticipantAudio = ({
     stream,
-    boost = 1.7,
+    boost = 3.0,
 }: {
     stream: MediaStream | null;
     boost?: number;
