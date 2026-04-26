@@ -159,8 +159,11 @@ export const Room = ({
     const screenStreamRef = useRef<MediaStream | null>(null);
     const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
     const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
+    const outboundAudioTrackRef = useRef<MediaStreamTrack | null>(null);
+    const mixedAudioContextRef = useRef<AudioContext | null>(null);
+    const mixedAudioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+    const mixedAudioTrackRef = useRef<MediaStreamTrack | null>(null);
     const screenVideoSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
-    const screenAudioSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -245,6 +248,57 @@ export const Room = ({
         if (!socket || !roomId) return;
         socket.emit("screen-share-status", { roomId, isSharing, trackId });
     }, []);
+
+    const disposeMixedAudio = useCallback(() => {
+        mixedAudioTrackRef.current?.stop();
+        mixedAudioTrackRef.current = null;
+        mixedAudioDestinationRef.current = null;
+
+        const audioContext = mixedAudioContextRef.current;
+        mixedAudioContextRef.current = null;
+        if (audioContext) {
+            audioContext.close().catch(() => undefined);
+        }
+    }, []);
+
+    const buildOutboundAudioTrack = useCallback(
+        (micTrack: MediaStreamTrack | null, screenAudioTrack: MediaStreamTrack | null) => {
+            disposeMixedAudio();
+
+            if (!screenAudioTrack) {
+                outboundAudioTrackRef.current = micTrack;
+                return micTrack;
+            }
+
+            const audioContext = new AudioContext();
+            const destination = audioContext.createMediaStreamDestination();
+
+            if (micTrack) {
+                const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
+                const micGain = audioContext.createGain();
+                micGain.gain.value = 1;
+                micSource.connect(micGain);
+                micGain.connect(destination);
+            }
+
+            const screenSource = audioContext.createMediaStreamSource(new MediaStream([screenAudioTrack]));
+            const screenGain = audioContext.createGain();
+            screenGain.gain.value = 1;
+            screenSource.connect(screenGain);
+            screenGain.connect(destination);
+
+            audioContext.resume().catch(() => undefined);
+
+            const mixedTrack = destination.stream.getAudioTracks()[0] ?? null;
+            mixedAudioContextRef.current = audioContext;
+            mixedAudioDestinationRef.current = destination;
+            mixedAudioTrackRef.current = mixedTrack;
+            outboundAudioTrackRef.current = mixedTrack;
+
+            return mixedTrack;
+        },
+        [disposeMixedAudio]
+    );
 
     // -----------------------------------------------------------------------
     // Fullscreen
@@ -339,6 +393,24 @@ export const Room = ({
         }
     }, []);
 
+    const syncOutboundAudioTrack = useCallback(
+        (audioTrack: MediaStreamTrack | null) => {
+            outboundAudioTrackRef.current = audioTrack;
+
+            peersRef.current.forEach((pc, peerId) => {
+                const audioSender = pc.getSenders().find((sender) => sender.track?.kind === "audio");
+
+                if (audioSender) {
+                    audioSender.replaceTrack(audioTrack).catch(() => undefined);
+                } else if (audioTrack) {
+                    pc.addTrack(audioTrack, localStreamRef.current);
+                    createAndSendOffer(peerId);
+                }
+            });
+        },
+        [createAndSendOffer]
+    );
+
     const ensurePeerConnection = useCallback(
         (peerId: string, peerName?: string) => {
             const existing = peersRef.current.get(peerId);
@@ -364,10 +436,6 @@ export const Room = ({
             if (screenStreamRef.current && screenVideoTrackRef.current) {
                 const s = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
                 screenVideoSendersRef.current.set(peerId, s);
-            }
-            if (screenStreamRef.current && screenAudioTrackRef.current) {
-                const s = pc.addTrack(screenAudioTrackRef.current, screenStreamRef.current);
-                screenAudioSendersRef.current.set(peerId, s);
             }
 
             pc.onicecandidate = (event) => {
@@ -407,7 +475,6 @@ export const Room = ({
                     peersRef.current.delete(peerId);
                     remoteStreamsRef.current.delete(peerId);
                     screenVideoSendersRef.current.delete(peerId);
-                    screenAudioSendersRef.current.delete(peerId);
                     makingOfferRef.current.delete(peerId);
                     removeParticipant(peerId);
                 }
@@ -427,8 +494,6 @@ export const Room = ({
         peersRef.current.forEach((pc, peerId) => {
             const vs = screenVideoSendersRef.current.get(peerId);
             if (vs) { pc.removeTrack(vs); screenVideoSendersRef.current.delete(peerId); }
-            const as = screenAudioSendersRef.current.get(peerId);
-            if (as) { pc.removeTrack(as); screenAudioSendersRef.current.delete(peerId); }
             createAndSendOffer(peerId);
         });
 
@@ -436,10 +501,11 @@ export const Room = ({
         screenStreamRef.current = null;
         screenVideoTrackRef.current = null;
         screenAudioTrackRef.current = null;
+        syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, null));
         setScreenPreviewStream(null);
         setIsScreenSharing(false);
         emitScreenShareStatus(false, null);
-    }, [createAndSendOffer, emitScreenShareStatus]);
+    }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, syncOutboundAudioTrack]);
 
     /**
      * FIX: startScreenShare now correctly sends screen audio to peers and
@@ -468,6 +534,7 @@ export const Room = ({
             screenStreamRef.current = stream;
             screenVideoTrackRef.current = videoTrack;
             screenAudioTrackRef.current = audioTrack;
+            syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, audioTrack));
 
             // Show local preview of the screen
             const previewStream = new MediaStream([videoTrack]);
@@ -485,11 +552,6 @@ export const Room = ({
                 const vs = pc.addTrack(videoTrack, stream);
                 screenVideoSendersRef.current.set(peerId, vs);
 
-                if (audioTrack) {
-                    const as = pc.addTrack(audioTrack, stream);
-                    screenAudioSendersRef.current.set(peerId, as);
-                }
-
                 createAndSendOffer(peerId);
             });
 
@@ -499,7 +561,7 @@ export const Room = ({
         } catch (e) {
             console.error("Screen share failed", e);
         }
-    }, [createAndSendOffer, emitScreenShareStatus, stopScreenShare]);
+    }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, stopScreenShare, syncOutboundAudioTrack]);
 
     const toggleScreenShare = useCallback(() => {
         if (isScreenSharing) stopScreenShare();
@@ -510,10 +572,12 @@ export const Room = ({
     // Local tracks — update senders when cam/mic changes
     // -----------------------------------------------------------------------
     useEffect(() => {
+        const nextAudioTrack = buildOutboundAudioTrack(localAudioTrack, screenAudioTrackRef.current);
         const nextLocalStream = new MediaStream();
         if (localVideoTrack) nextLocalStream.addTrack(localVideoTrack);
-        if (localAudioTrack) nextLocalStream.addTrack(localAudioTrack);
+        if (nextAudioTrack) nextLocalStream.addTrack(nextAudioTrack);
         localStreamRef.current = nextLocalStream;
+        outboundAudioTrackRef.current = nextAudioTrack;
 
         if (localCameraPreviewRef.current) {
             localCameraPreviewRef.current.srcObject = new MediaStream(localVideoTrack ? [localVideoTrack] : []);
@@ -526,22 +590,22 @@ export const Room = ({
             const camSender = senders.find(
                 (s) => s.track?.kind === "video" && s.track.id !== screenVideoTrackRef.current?.id
             );
-            const micSender = senders.find(
-                (s) => s.track?.kind === "audio" && s.track.id !== screenAudioTrackRef.current?.id
-            );
+            const micSender = senders.find((s) => s.track?.kind === "audio");
 
             if (localVideoTrack) {
                 if (camSender) camSender.replaceTrack(localVideoTrack).catch(() => undefined);
                 else pc.addTrack(localVideoTrack, localStreamRef.current);
             }
-            if (localAudioTrack) {
-                if (micSender) micSender.replaceTrack(localAudioTrack).catch(() => undefined);
-                else pc.addTrack(localAudioTrack, localStreamRef.current);
+            if (nextAudioTrack) {
+                if (micSender) micSender.replaceTrack(nextAudioTrack).catch(() => undefined);
+                else pc.addTrack(nextAudioTrack, localStreamRef.current);
+            } else if (micSender) {
+                micSender.replaceTrack(null).catch(() => undefined);
             }
 
             createAndSendOffer(peerId);
         });
-    }, [createAndSendOffer, localAudioTrack, localVideoTrack]);
+    }, [buildOutboundAudioTrack, createAndSendOffer, localAudioTrack, localVideoTrack]);
 
     // -----------------------------------------------------------------------
     // Socket.io
@@ -677,7 +741,6 @@ export const Room = ({
             peersRef.current.delete(participantId);
             remoteStreamsRef.current.delete(participantId);
             screenVideoSendersRef.current.delete(participantId);
-            screenAudioSendersRef.current.delete(participantId);
             peerNamesRef.current.delete(participantId);
             makingOfferRef.current.delete(participantId);
             removeParticipant(participantId);
@@ -696,11 +759,18 @@ export const Room = ({
             participantStateRef.current.clear();
             screenStatusRef.current.clear();
             makingOfferRef.current.clear();
+            disposeMixedAudio();
             socket.disconnect();
             socketRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    useEffect(() => {
+        return () => {
+            disposeMixedAudio();
+        };
+    }, [disposeMixedAudio]);
 
     // -----------------------------------------------------------------------
     // Layout logic
