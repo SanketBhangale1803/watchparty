@@ -135,7 +135,8 @@ export const Room = ({
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
     const [participants, setParticipants] = useState<ParticipantState[]>([]);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
-    const [, setScreenPreviewStream] = useState<MediaStream | null>(null);
+    const isScreenSharingRef = useRef(false);
+    const [screenPreviewStream, setScreenPreviewStream] = useState<MediaStream | null>(null);
 
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [showParticipants, setShowParticipants] = useState(false);
@@ -420,7 +421,8 @@ export const Room = ({
 
             pc.onconnectionstatechange = () => {
                 const state = pc.connectionState;
-                if (state === "failed" || state === "closed" || state === "disconnected") {
+                // Do not tear down on "disconnected" — it is often transient; ICE may recover.
+                if (state === "failed" || state === "closed") {
                     pc.close();
                     peersRef.current.delete(peerId);
                     remoteStreamsRef.current.delete(peerId);
@@ -453,6 +455,7 @@ export const Room = ({
         syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, null));
         setScreenPreviewStream(null);
         setIsScreenSharing(false);
+        isScreenSharingRef.current = false;
         emitScreenShareStatus(false, null);
     }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, syncOutboundAudioTrack]);
 
@@ -481,15 +484,10 @@ export const Room = ({
             screenAudioTrackRef.current = audioTrack;
             syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, audioTrack));
 
-            // Use the actual screen stream, not a copy
+            // Use the actual screen stream, not a copy (effect binds <video> after mount)
             setScreenPreviewStream(stream);
             setIsScreenSharing(true);
-
-            // Set the video element source immediately
-            if (localScreenPreviewRef.current) {
-                localScreenPreviewRef.current.srcObject = stream;
-                localScreenPreviewRef.current.play().catch(() => undefined);
-            }
+            isScreenSharingRef.current = true;
 
             peersRef.current.forEach((pc, peerId) => {
                 const vs = pc.addTrack(videoTrack, stream);
@@ -547,6 +545,13 @@ export const Room = ({
     }, [buildOutboundAudioTrack, createAndSendOffer, localAudioTrack, localVideoTrack]);
 
     useEffect(() => {
+        const video = localScreenPreviewRef.current;
+        if (!video || !screenPreviewStream) return;
+        video.srcObject = screenPreviewStream;
+        video.play().catch(() => undefined);
+    }, [screenPreviewStream]);
+
+    useEffect(() => {
         const socket = io(URL);
         socketRef.current = socket;
 
@@ -583,41 +588,18 @@ export const Room = ({
 
         socket.on("participant-joined", ({ participant }: { roomId: string; participant: PeerSummary }) => {
             peerNamesRef.current.set(participant.id, participant.name);
-            const pc = ensurePeerConnection(participant.id, participant.name);
-            
-            // If we are screen sharing, add our screen track to the new peer
-            if (isScreenSharing && screenVideoTrackRef.current && screenStreamRef.current) {
-                // Check if we already have a sender for this peer
-                let sender = screenVideoSendersRef.current.get(participant.id);
-                if (!sender) {
-                    sender = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
-                    screenVideoSendersRef.current.set(participant.id, sender);
-                }
-                
-                // Send screen share status to new peer
-                socket.emit("screen-share-status", { 
-                    roomId: currentRoomIdRef.current, 
-                    isSharing: true, 
-                    trackId: screenVideoTrackRef.current.id 
+            ensurePeerConnection(participant.id, participant.name);
+
+            // Must use ref: this handler is registered once; `isScreenSharing` state would be stale here.
+            if (isScreenSharingRef.current && screenVideoTrackRef.current && currentRoomIdRef.current) {
+                socket.emit("screen-share-status", {
+                    roomId: currentRoomIdRef.current,
+                    isSharing: true,
+                    trackId: screenVideoTrackRef.current.id,
                 });
             }
-            
-            // Create and send the offer
+
             createAndSendOffer(participant.id);
-            
-            // If we're screen sharing, ensure the screen track is sent by triggering renegotiation
-            if (isScreenSharing && screenVideoTrackRef.current) {
-                // Delay to allow connection to stabilize
-                setTimeout(() => {
-                    // Force track to be sent by replacing with same track
-                    const sender = screenVideoSendersRef.current.get(participant.id);
-                    if (sender && screenVideoTrackRef.current) {
-                        sender.replaceTrack(screenVideoTrackRef.current).catch(() => {});
-                    }
-                    // Create new offer to include screen track
-                    createAndSendOffer(participant.id);
-                }, 1000);
-            }
         });
 
         socket.on(
@@ -917,7 +899,7 @@ export const Room = ({
                             background: "#000",
                         }}>
                             {sharingParticipant.isLocal ? (
-                                screenStreamRef.current ? (
+                                screenPreviewStream ? (
                                     <video
                                         ref={localScreenPreviewRef}
                                         autoPlay
