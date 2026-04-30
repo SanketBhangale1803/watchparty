@@ -1,7 +1,7 @@
 {
     "name": "watchparty-backend",
     "version": "1.0.0",
-    "description": "WebRTC signaling server for watchparty",
+    "description": "Socket.IO signaling for Closr (group WebRTC calls)",
     "scripts": {
         "build": "cd backend && npm install && npm run build",
         "start": "node backend/dist/index.js"

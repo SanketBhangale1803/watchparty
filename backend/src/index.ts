@@ -17,7 +17,7 @@ app.use((_req: Request, res: Response, next) => {
 
 // Health check route for Railway
 app.get('/', (_req: Request, res: Response) => {
-    res.status(200).send('Watchparty signaling server is running');
+    res.status(200).send('Closr signaling server is running');
 });
 
 app.get('/health', (_req: Request, res: Response) => {

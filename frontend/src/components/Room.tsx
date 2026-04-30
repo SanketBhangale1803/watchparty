@@ -3,6 +3,79 @@ import { Socket, io } from "socket.io-client";
 
 const URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
 
+/** Screen-share tuning: defaults often optimize like a webcam (bursty keyframes, variable FPS). */
+const SCREEN_SHARE_TARGET_FPS = 30;
+
+async function prepareScreenCaptureVideoTrack(track: MediaStreamTrack): Promise<void> {
+    if (track.kind !== "video") return;
+    try {
+        track.contentHint = "detail";
+    } catch {
+        /* unsupported */
+    }
+    try {
+        await track.applyConstraints({
+            frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, max: SCREEN_SHARE_TARGET_FPS },
+            width: { max: 1920 },
+            height: { max: 1080 },
+        });
+    } catch {
+        /* display surfaces often ignore or partially apply constraints */
+    }
+}
+
+async function applyScreenShareSenderEncoding(sender: RTCRtpSender): Promise<void> {
+    try {
+        const params = sender.getParameters();
+        const encodings: RTCRtpEncodingParameters[] =
+            params.encodings?.length > 0
+                ? params.encodings.map((e) => ({ ...e }))
+                : [{ active: true }];
+
+        for (const enc of encodings) {
+            enc.maxFramerate = SCREEN_SHARE_TARGET_FPS;
+            enc.maxBitrate =
+                enc.maxBitrate != null ? Math.min(enc.maxBitrate, 8_000_000) : 8_000_000;
+            // Chromium: prefer steady FPS when bandwidth is tight (DOM typings omit this field).
+            (enc as RTCRtpEncodingParameters & { degradationPreference?: string }).degradationPreference =
+                "maintain-framerate";
+        }
+
+        params.encodings = encodings;
+        await sender.setParameters(params);
+    } catch {
+        /* parameters may not be applied until negotiation finishes */
+    }
+}
+
+/** Apply encoder prefs once DTLS/SRTP transport is up (and retry after signaling settles). */
+function scheduleScreenShareSenderTuning(sender: RTCRtpSender): void {
+    const tune = () => void applyScreenShareSenderEncoding(sender);
+    tune();
+
+    const transport = sender.transport;
+    if (!transport) {
+        window.setTimeout(tune, 350);
+        window.setTimeout(tune, 1400);
+        return;
+    }
+
+    if (transport.state === "connected") {
+        tune();
+        return;
+    }
+
+    const onState = () => {
+        if (transport.state === "connected") {
+            transport.removeEventListener("statechange", onState);
+            void applyScreenShareSenderEncoding(sender);
+        }
+    };
+    transport.addEventListener("statechange", onState);
+
+    window.setTimeout(tune, 400);
+}
+
 type PeerSummary = {
     id: string;
     name: string;
@@ -372,6 +445,8 @@ export const Room = ({
             const socket = socketRef.current;
             const pc = new RTCPeerConnection({
                 iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+                bundlePolicy: "max-bundle",
+                rtcpMuxPolicy: "require",
             });
             peersRef.current.set(peerId, pc);
 
@@ -390,6 +465,7 @@ export const Room = ({
             if (screenStreamRef.current && screenVideoTrackRef.current) {
                 const s = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
                 screenVideoSendersRef.current.set(peerId, s);
+                scheduleScreenShareSenderTuning(s);
             }
 
             pc.onicecandidate = (event) => {
@@ -461,15 +537,29 @@ export const Room = ({
 
     const startScreenShare = useCallback(async () => {
         try {
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                    sampleRate: 44100,
-                },
-            });
+            const audioConstraints = {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 44100,
+            } as const;
+
+            let stream: MediaStream;
+            try {
+                stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, max: SCREEN_SHARE_TARGET_FPS },
+                        width: { max: 1920 },
+                        height: { max: 1080 },
+                    },
+                    audio: audioConstraints,
+                });
+            } catch {
+                stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: audioConstraints,
+                });
+            }
 
             const videoTrack = stream.getVideoTracks()[0] ?? null;
             const audioTrack = stream.getAudioTracks()[0] ?? null;
@@ -478,6 +568,8 @@ export const Room = ({
                 stream.getTracks().forEach((t) => t.stop());
                 return;
             }
+
+            await prepareScreenCaptureVideoTrack(videoTrack);
 
             screenStreamRef.current = stream;
             screenVideoTrackRef.current = videoTrack;
@@ -492,6 +584,7 @@ export const Room = ({
             peersRef.current.forEach((pc, peerId) => {
                 const vs = pc.addTrack(videoTrack, stream);
                 screenVideoSendersRef.current.set(peerId, vs);
+                scheduleScreenShareSenderTuning(vs);
                 createAndSendOffer(peerId);
             });
 
@@ -837,7 +930,7 @@ export const Room = ({
                         ▶
                     </div>
                     <div>
-                        <h2 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white" }}>WatchParty</h2>
+                        <h2 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white" }}>Closr</h2>
                         {currentRoomId && (
                             <p style={{ fontSize: "0.75rem", color: "#94a3b8", margin: 0 }}>
                                 Room: <strong style={{ color: "#e2e8f0" }}>{currentRoomId}</strong>

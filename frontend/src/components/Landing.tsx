@@ -100,7 +100,7 @@ export const Landing = () => {
                         }}>
                             ▶
                         </div>
-                        <span style={{ fontWeight: 700, fontSize: "1.25rem" }}>WatchParty</span>
+                        <span style={{ fontWeight: 700, fontSize: "1.25rem" }}>Closr</span>
                     </div>
                 </header>
 
@@ -218,18 +218,18 @@ export const Landing = () => {
                         <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
                             <div>
                                 <h1 style={{ fontSize: "2rem", fontWeight: 800, lineHeight: 1.2 }}>
-                                    Watch & connect
+                                    Video calls
                                     <br />
                                     <span style={{
                                         background: "linear-gradient(135deg, var(--primary), #7c3aed)",
                                         WebkitBackgroundClip: "text",
                                         WebkitTextFillColor: "transparent",
                                     }}>
-                                        together
+                                        built for friends
                                     </span>
                                 </h1>
                                 <p style={{ color: "var(--text-muted)", marginTop: "0.75rem", fontSize: "1.05rem" }}>
-                                    Share screens, watch videos, and hang out with friends in real-time.
+                                    Simple rooms, clear layout, minimal friction—jump in and talk without the usual call-app noise.
                                 </p>
                             </div>
 
