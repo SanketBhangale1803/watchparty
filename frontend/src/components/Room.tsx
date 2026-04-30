@@ -228,8 +228,8 @@ export const Room = ({
     demoRoomIdRef.current = demoRoomId;
     nameRef.current = name;
 
-    /** Server-assigned ID, or the ID you typed while joining (until `room-joined` arrives). */
-    const displayedRoomId = currentRoomId ?? (demoRoomId?.trim() || null);
+    /** Show room id only after server confirms it. */
+    const displayedRoomId = currentRoomId;
 
     const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
     const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
@@ -806,7 +806,7 @@ export const Room = ({
 
         socket.on("room-join-error", ({ message }: { message: string }) => {
             alert(message);
-            setLobby(true);
+            window.location.reload();
         });
 
         return () => {

@@ -7,6 +7,7 @@ export const Landing = () => {
     const [localVideoTrack, setlocalVideoTrack] = useState<MediaStreamTrack | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [joined, setJoined] = useState(false);
+    const [requestedRoomId, setRequestedRoomId] = useState<string | undefined>(undefined);
     const [micEnabled, setMicEnabled] = useState(true);
     const [camEnabled, setCamEnabled] = useState(true);
     const [mediaError, setMediaError] = useState<string | null>(null);
@@ -255,7 +256,12 @@ export const Landing = () => {
                                     <button
                                         className="btn btn-primary"
                                         disabled={!name || !roomId}
-                                        onClick={() => setJoined(true)}
+                                        onClick={() => {
+                                            const joinId = roomId.trim();
+                                            if (!joinId) return;
+                                            setRequestedRoomId(joinId);
+                                            setJoined(true);
+                                        }}
                                         style={{ minWidth: "110px", padding: "0.875rem 1.5rem" }}
                                     >
                                         Join
@@ -286,6 +292,7 @@ export const Landing = () => {
                                     className="btn btn-secondary"
                                     disabled={!name}
                                     onClick={() => {
+                                        setRequestedRoomId(undefined);
                                         setRoomId("");
                                         setJoined(true);
                                     }}
@@ -305,5 +312,5 @@ export const Landing = () => {
         );
     }
 
-    return <Room name={name} localAudioTrack={localAudioTrack} localVideoTrack={localVideoTrack} demoRoomId={roomId} />
+    return <Room name={name} localAudioTrack={localAudioTrack} localVideoTrack={localVideoTrack} demoRoomId={requestedRoomId} />
 }
