@@ -2,9 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Socket, io } from "socket.io-client";
 
 const DEFAULT_BACKEND_URL = "https://closr-live.onrender.com";
-const URL =
+const normalizeBackendUrl = (rawUrl: string): string => {
+    const trimmed = rawUrl.trim().replace(/\/+$/, "");
+    // Common misconfig: setting VITE_BACKEND_URL to ".../socket.io" instead of backend origin.
+    return trimmed.endsWith("/socket.io") ? trimmed.slice(0, -"/socket.io".length) : trimmed;
+};
+
+const rawBackendUrl =
     import.meta.env.VITE_BACKEND_URL?.trim() ||
     (import.meta.env.PROD ? DEFAULT_BACKEND_URL : "http://localhost:3000");
+const URL = normalizeBackendUrl(rawBackendUrl);
 
 /** Screen-share tuning: defaults often optimize like a webcam (bursty keyframes, variable FPS). */
 const SCREEN_SHARE_TARGET_FPS = 30;
