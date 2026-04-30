@@ -577,6 +577,7 @@ export const Room = ({
         socket.on("participant-joined", ({ participant }: { roomId: string; participant: PeerSummary }) => {
             peerNamesRef.current.set(participant.id, participant.name);
             ensurePeerConnection(participant.id, participant.name);
+            createAndSendOffer(participant.id);
         });
 
         socket.on(
@@ -712,6 +713,12 @@ export const Room = ({
         [participants]
     );
 
+    const sharingParticipant = useMemo(() => {
+        if (isScreenSharing) return { id: "self", name, isLocal: true };
+        const sharing = remoteParticipants.find(p => p.isSharingScreen);
+        return sharing ? { id: sharing.id, name: sharing.name, isLocal: false } : null;
+    }, [isScreenSharing, remoteParticipants, name]);
+
     const allTiles = useMemo(() => {
         const tiles = [{ id: "self", name, displayStream: localStreamRef.current, isLocal: true }];
         remoteParticipants.forEach((p) => {
@@ -720,15 +727,20 @@ export const Room = ({
         return tiles;
     }, [name, remoteParticipants]);
 
+    const nonSharingTiles = useMemo(() => {
+        if (!sharingParticipant) return allTiles;
+        return allTiles.filter(t => t.id !== sharingParticipant.id);
+    }, [allTiles, sharingParticipant]);
+
     const gridCols = useMemo(() => {
-        const count = allTiles.length;
+        const count = sharingParticipant ? nonSharingTiles.length : allTiles.length;
         if (count <= 1) return "1fr";
         if (count === 2) return "1fr 1fr";
         if (count <= 4) return "1fr 1fr";
         if (count <= 6) return "1fr 1fr 1fr";
         if (count <= 9) return "1fr 1fr 1fr";
         return "1fr 1fr 1fr 1fr";
-    }, [allTiles.length]);
+    }, [allTiles.length, sharingParticipant, nonSharingTiles.length]);
 
     const totalParticipants = 1 + remoteParticipants.length;
 
@@ -850,9 +862,48 @@ export const Room = ({
                     flexDirection: "column",
                     overflow: "hidden",
                     padding: showParticipants ? "0.75rem" : "0.75rem 0.75rem 0.75rem 0.75rem",
+                    gap: sharingParticipant ? "0.75rem" : "0",
                 }}>
+                    {/* Screen share large view */}
+                    {sharingParticipant && (
+                        <div style={{
+                            flex: "2",
+                            minHeight: "200px",
+                            position: "relative",
+                            borderRadius: "0.75rem",
+                            overflow: "hidden",
+                            background: "#1e293b",
+                        }}>
+                            {sharingParticipant.isLocal ? (
+                                <video
+                                    ref={localScreenPreviewRef}
+                                    autoPlay
+                                    muted
+                                    playsInline
+                                    style={{
+                                        width: "100%",
+                                        height: "100%",
+                                        objectFit: "contain",
+                                        background: "#000",
+                                    }}
+                                />
+                            ) : (
+                                <ParticipantVideo
+                                    stream={remoteParticipants.find(p => p.id === sharingParticipant.id)?.displayStream || null}
+                                    label={`${sharingParticipant.name} (Sharing Screen)`}
+                                    prioritized
+                                    muted
+                                />
+                            )}
+                            <div className="tile-label">
+                                {sharingParticipant.isLocal ? "Your Screen" : `${sharingParticipant.name}'s Screen`}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Participants grid */}
                     <div style={{
-                        flex: 1,
+                        flex: sharingParticipant ? "1" : "1",
                         display: "grid",
                         gridTemplateColumns: gridCols,
                         gap: "0.75rem",
@@ -860,6 +911,7 @@ export const Room = ({
                         minHeight: 0,
                     }}>
                         {allTiles.map((tile) => {
+                            if (sharingParticipant && tile.id === sharingParticipant.id) return null;
                             const remoteP = remoteParticipants.find((p) => p.id === tile.id);
                             const isSharing = tile.id === "self" ? isScreenSharing : (remoteP?.isSharingScreen ?? false);
                             return (

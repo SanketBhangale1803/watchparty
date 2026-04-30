@@ -10,56 +10,61 @@ export const Landing = () => {
     const [micEnabled, setMicEnabled] = useState(true);
     const [camEnabled, setCamEnabled] = useState(true);
     const [mediaError, setMediaError] = useState<string | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
 
     const getCam = async () => {
         try {
             setMediaError(null);
             const stream = await window.navigator.mediaDevices.getUserMedia({
-                video: camEnabled,
-                audio: micEnabled ? {
+                video: true,
+                audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true,
-                } : false,
-            })
-            const audioTrack = stream.getAudioTracks()[0]
-            const videoTrack = stream.getVideoTracks()[0]
-            setLocalAudioTrack(audioTrack ?? null);
-            setlocalVideoTrack(videoTrack ?? null);
-            if (videoRef.current && videoTrack) {
-                videoRef.current.srcObject = new MediaStream([videoTrack])
-                videoRef.current.play();
+                },
+            });
+            streamRef.current = stream;
+            const audioTrack = stream.getAudioTracks()[0];
+            const videoTrack = stream.getVideoTracks()[0];
+            setLocalAudioTrack(audioTrack);
+            setlocalVideoTrack(videoTrack);
+            if (videoRef.current) {
+                videoRef.current.srcObject = new MediaStream([videoTrack]);
+                videoRef.current.play().catch(() => {});
             }
         } catch (e) {
             console.error("Error accessing media devices:", e);
             setMediaError("Could not access camera/microphone. Please check permissions.");
         }
-    }
+    };
 
     useEffect(() => {
         getCam();
+        return () => {
+            streamRef.current?.getTracks().forEach(t => t.stop());
+        };
     }, []);
 
-    const toggleMic = async () => {
-        if (micEnabled) {
-            localAudioTrack?.stop();
-            setLocalAudioTrack(null);
-            setMicEnabled(false);
-        } else {
-            await getCam();
-            setMicEnabled(true);
+    const toggleMic = () => {
+        if (localAudioTrack) {
+            localAudioTrack.enabled = !localAudioTrack.enabled;
+            setMicEnabled(localAudioTrack.enabled);
         }
     };
 
-    const toggleCam = async () => {
-        if (camEnabled) {
-            localVideoTrack?.stop();
-            setlocalVideoTrack(null);
-            if (videoRef.current) videoRef.current.srcObject = null;
-            setCamEnabled(false);
-        } else {
-            await getCam();
-            setCamEnabled(true);
+    const toggleCam = () => {
+        if (localVideoTrack) {
+            localVideoTrack.enabled = !localVideoTrack.enabled;
+            setCamEnabled(localVideoTrack.enabled);
+            if (!localVideoTrack.enabled && videoRef.current) {
+                videoRef.current.srcObject = null;
+            } else if (localVideoTrack.enabled && videoRef.current && streamRef.current) {
+                const videoTrack = streamRef.current.getVideoTracks()[0];
+                if (videoTrack) {
+                    videoRef.current.srcObject = new MediaStream([videoTrack]);
+                    videoRef.current.play().catch(() => {});
+                }
+            }
         }
     };
 
@@ -118,7 +123,7 @@ export const Landing = () => {
                     }}>
                         {/* Left: Video preview */}
                         <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                            <div className="card" style={{ padding: 0, overflow: "hidden", aspectRatio: "16/9" }}>
+                            <div className="card" style={{ padding: 0, overflow: "hidden", aspectRatio: "16/9", position: "relative" }}>
                                 <video
                                     autoPlay
                                     muted
@@ -130,7 +135,7 @@ export const Landing = () => {
                                         objectFit: "cover",
                                         transform: "scaleX(-1)",
                                         background: "#000",
-                                        display: "block",
+                                        display: camEnabled ? "block" : "none",
                                     }}
                                 />
                                 {!camEnabled && (
