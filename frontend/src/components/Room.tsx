@@ -555,10 +555,10 @@ export const Room = ({
             else socket.emit("create-room", { name });
         });
 
-        socket.on("disconnect", () => {
-            // Our socket disconnected - this might be due to network issues
-            // Try to reconnect
-            console.log("Socket disconnected, attempting to reconnect...");
+        socket.on("disconnect", (reason) => {
+            console.log("Socket disconnected:", reason);
+            // Don't auto-reconnect here as it can cause issues
+            // User can manually refresh if needed
         });
 
         socket.on("room-created", ({ roomId }: { roomId: string }) => {
@@ -905,7 +905,7 @@ export const Room = ({
                     borderRadius: "0.75rem",
                     background: "#1e293b",
                 }}>
-                    {/* Screen share view - show when someone is sharing */}
+{/* Screen share view - show when someone is sharing */}
                     {sharingParticipant ? (
                         <div style={{
                             flex: 1,
@@ -916,19 +916,27 @@ export const Room = ({
                             background: "#000",
                         }}>
                             {sharingParticipant.isLocal ? (
-                                <video
-                                    key={isScreenSharing ? "screen-share-active" : "no-share"}
-                                    ref={localScreenPreviewRef}
-                                    autoPlay
+                                <ParticipantVideo
+                                    stream={screenStreamRef.current}
+                                    label="Your Screen"
+                                    mirrored
                                     muted
-                                    playsInline
-                                    style={{
-                                        width: "100%",
-                                        height: "100%",
-                                        objectFit: "contain",
-                                    }}
+                                    isLocal
+                                    prioritized
                                 />
                             ) : (
+                                <ParticipantVideo
+                                    stream={remoteParticipants.find(p => p.id === sharingParticipant.id)?.displayStream || null}
+                                    label={`${sharingParticipant.name} is sharing`}
+                                    prioritized
+                                    muted
+                                />
+                            )}
+                            <div className="tile-label" style={{ zIndex: 10 }}>
+                                {sharingParticipant.isLocal ? "Your Screen" : `${sharingParticipant.name}'s Screen`}
+                            </div>
+                        </div>
+                    ) : (
                                 <ParticipantVideo
                                     stream={remoteParticipants.find(p => p.id === sharingParticipant.id)?.displayStream || null}
                                     label={`${sharingParticipant.name} is sharing`}
