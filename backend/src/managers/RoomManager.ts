@@ -154,23 +154,6 @@ export class RoomManager {
         });
     }
 
-    onPlaybackToggle(roomId: string, senderSocketId: string, paused: boolean) {
-        const room = this.rooms.get(roomId);
-        if (!room) {
-            return;
-        }
-
-        room.participants.forEach((participant) => {
-            if (participant.socket.id !== senderSocketId) {
-                participant.socket.emit("playback-toggle", {
-                    roomId,
-                    senderId: senderSocketId,
-                    paused
-                });
-            }
-        });
-    }
-
     removeUser(socketId: string) {
         const roomId = this.userRoomMap.get(socketId);
         if (!roomId) {

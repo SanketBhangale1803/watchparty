@@ -134,10 +134,6 @@ export const Room = ({
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [, setScreenPreviewStream] = useState<MediaStream | null>(null);
 
-    // FIX: Play/pause now controls MediaStreamTrack.enabled on ALL tracks,
-    // not just the HTMLVideoElement.pause() — so screen share audio also stops.
-    const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
-
     const [isFullscreen, setIsFullscreen] = useState(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -164,6 +160,8 @@ export const Room = ({
     const mixedAudioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
     const mixedAudioTrackRef = useRef<MediaStreamTrack | null>(null);
     const screenVideoSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
+    const cameraSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
+    const audioSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -332,53 +330,6 @@ export const Room = ({
     }, []);
 
     // -----------------------------------------------------------------------
-    // FIX: Play / Pause — toggle MediaStreamTrack.enabled on ALL remote tracks
-    // so screen-share audio and video both pause, not just the <video> element.
-    // -----------------------------------------------------------------------
-    const applyPlaybackState = useCallback((paused: boolean) => {
-        // Pause/resume all remote participant tracks
-        participantStateRef.current.forEach((participant) => {
-            participant.sourceStream.getTracks().forEach((track) => {
-                track.enabled = !paused;
-            });
-        });
-
-        // Also pause/resume the local screen preview video element
-        if (localScreenPreviewRef.current) {
-            if (paused) {
-                localScreenPreviewRef.current.pause();
-            } else {
-                localScreenPreviewRef.current.play().catch(() => undefined);
-            }
-        }
-        if (localCameraPreviewRef.current) {
-            if (paused) {
-                localCameraPreviewRef.current.pause();
-            } else {
-                localCameraPreviewRef.current.play().catch(() => undefined);
-            }
-        }
-    }, []);
-
-    const setPlaybackState = useCallback(
-        (paused: boolean, emit: boolean) => {
-            setIsPlaybackPaused(paused);
-            applyPlaybackState(paused);
-
-            if (!emit) return;
-            const socket = socketRef.current;
-            const roomId = currentRoomIdRef.current;
-            if (!socket || !roomId) return;
-            socket.emit("playback-toggle", { roomId, paused });
-        },
-        [applyPlaybackState]
-    );
-
-    // const togglePlayback = useCallback(() => {
-    //     setPlaybackState(!isPlaybackPaused, true);
-    // }, [isPlaybackPaused, setPlaybackState]);
-
-    // -----------------------------------------------------------------------
     // WebRTC helpers
     // -----------------------------------------------------------------------
     const createAndSendOffer = useCallback(async (peerId: string) => {
@@ -405,12 +356,13 @@ export const Room = ({
             outboundAudioTrackRef.current = audioTrack;
 
             peersRef.current.forEach((pc, peerId) => {
-                const audioSender = pc.getSenders().find((sender) => sender.track?.kind === "audio");
+                const audioSender = audioSendersRef.current.get(peerId);
 
                 if (audioSender) {
                     audioSender.replaceTrack(audioTrack).catch(() => undefined);
                 } else if (audioTrack) {
-                    pc.addTrack(audioTrack, localStreamRef.current);
+                    const sender = pc.addTrack(audioTrack, localStreamRef.current);
+                    audioSendersRef.current.set(peerId, sender);
                     createAndSendOffer(peerId);
                 }
             });
@@ -434,10 +386,18 @@ export const Room = ({
             });
             peersRef.current.set(peerId, pc);
 
-            // Add camera + mic tracks
-            localStreamRef.current.getTracks().forEach((track) => {
-                pc.addTrack(track, localStreamRef.current);
-            });
+            // Add camera + mic tracks with stable sender references.
+            const initialVideoTrack = localStreamRef.current.getVideoTracks()[0] ?? null;
+            if (initialVideoTrack) {
+                const cameraSender = pc.addTrack(initialVideoTrack, localStreamRef.current);
+                cameraSendersRef.current.set(peerId, cameraSender);
+            }
+
+            const initialAudioTrack = outboundAudioTrackRef.current;
+            if (initialAudioTrack) {
+                const audioSender = pc.addTrack(initialAudioTrack, localStreamRef.current);
+                audioSendersRef.current.set(peerId, audioSender);
+            }
 
             // Add screen tracks if already sharing
             if (screenStreamRef.current && screenVideoTrackRef.current) {
@@ -467,9 +427,6 @@ export const Room = ({
                     upsertParticipantStream(peerId, currentStream);
                 };
 
-                // FIX: apply current paused state to newly arriving tracks
-                event.track.enabled = !isPlaybackPaused;
-
                 upsertParticipantStream(peerId, currentStream);
             };
 
@@ -482,6 +439,8 @@ export const Room = ({
                     peersRef.current.delete(peerId);
                     remoteStreamsRef.current.delete(peerId);
                     screenVideoSendersRef.current.delete(peerId);
+                    cameraSendersRef.current.delete(peerId);
+                    audioSendersRef.current.delete(peerId);
                     makingOfferRef.current.delete(peerId);
                     removeParticipant(peerId);
                 }
@@ -489,7 +448,7 @@ export const Room = ({
 
             return pc;
         },
-        [createAndSendOffer, isPlaybackPaused, removeParticipant, upsertParticipantStream]
+        [createAndSendOffer, removeParticipant, upsertParticipantStream]
     );
 
     // -----------------------------------------------------------------------
@@ -592,20 +551,25 @@ export const Room = ({
         }
 
         peersRef.current.forEach((pc, peerId) => {
-            const senders = pc.getSenders();
-
-            const camSender = senders.find(
-                (s) => s.track?.kind === "video" && s.track.id !== screenVideoTrackRef.current?.id
-            );
-            const micSender = senders.find((s) => s.track?.kind === "audio");
+            const camSender = cameraSendersRef.current.get(peerId);
+            const micSender = audioSendersRef.current.get(peerId);
 
             if (localVideoTrack) {
                 if (camSender) camSender.replaceTrack(localVideoTrack).catch(() => undefined);
-                else pc.addTrack(localVideoTrack, localStreamRef.current);
+                else {
+                    const sender = pc.addTrack(localVideoTrack, localStreamRef.current);
+                    cameraSendersRef.current.set(peerId, sender);
+                }
+            } else if (camSender) {
+                camSender.replaceTrack(null).catch(() => undefined);
             }
+
             if (nextAudioTrack) {
                 if (micSender) micSender.replaceTrack(nextAudioTrack).catch(() => undefined);
-                else pc.addTrack(nextAudioTrack, localStreamRef.current);
+                else {
+                    const sender = pc.addTrack(nextAudioTrack, localStreamRef.current);
+                    audioSendersRef.current.set(peerId, sender);
+                }
             } else if (micSender) {
                 micSender.replaceTrack(null).catch(() => undefined);
             }
@@ -738,16 +702,14 @@ export const Room = ({
             }
         );
 
-        socket.on("playback-toggle", ({ paused }: { paused: boolean }) => {
-            setPlaybackState(paused, false);
-        });
-
         socket.on("participant-left", ({ participantId }: { roomId: string; participantId: string }) => {
             const pc = peersRef.current.get(participantId);
             if (pc) pc.close();
             peersRef.current.delete(participantId);
             remoteStreamsRef.current.delete(participantId);
             screenVideoSendersRef.current.delete(participantId);
+            cameraSendersRef.current.delete(participantId);
+            audioSendersRef.current.delete(participantId);
             peerNamesRef.current.delete(participantId);
             makingOfferRef.current.delete(participantId);
             removeParticipant(participantId);
@@ -766,6 +728,8 @@ export const Room = ({
             participantStateRef.current.clear();
             screenStatusRef.current.clear();
             makingOfferRef.current.clear();
+            cameraSendersRef.current.clear();
+            audioSendersRef.current.clear();
             disposeMixedAudio();
             socket.disconnect();
             socketRef.current = null;
@@ -881,7 +845,6 @@ export const Room = ({
             >
                 {/* ── Main panel ── */}
                 <div style={{ position: "relative", minHeight: 0, overflow: "hidden", borderRadius: "0.75rem" }}>
-
                     {/* Local screen share — always mounted, shown via CSS opacity */}
                     <div
                         className="video-container"
@@ -1031,7 +994,7 @@ export const Room = ({
                         ))}
                     </div>
 
-                    {/* Controls — no play/pause */}
+                    {/* Controls */}
                     <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "auto" }}>
                         <button
                             className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"}

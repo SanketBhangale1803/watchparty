@@ -66,9 +66,5 @@ export class UserManager {
         socket.on("screen-share-status", ({ isSharing, roomId, trackId }: { isSharing: boolean, roomId: string, trackId: string | null }) => {
             this.roomManager.onScreenShareStatus(roomId, socket.id, isSharing, trackId ?? null);
         });
-
-        socket.on("playback-toggle", ({ roomId, paused }: { roomId: string, paused: boolean }) => {
-            this.roomManager.onPlaybackToggle(roomId, socket.id, paused);
-        });
     }
 }
