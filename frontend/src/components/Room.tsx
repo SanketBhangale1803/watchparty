@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Socket, io } from "socket.io-client";
 
-const URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
+const DEFAULT_BACKEND_URL = "https://closr-live.onrender.com";
+const URL =
+    import.meta.env.VITE_BACKEND_URL?.trim() ||
+    (import.meta.env.PROD ? DEFAULT_BACKEND_URL : "http://localhost:3000");
 
 /** Screen-share tuning: defaults often optimize like a webcam (bursty keyframes, variable FPS). */
 const SCREEN_SHARE_TARGET_FPS = 30;
@@ -653,7 +656,10 @@ export const Room = ({
     }, [screenPreviewStream]);
 
     useEffect(() => {
-        const socket = io(URL);
+        const socket = io(URL, {
+            path: "/socket.io",
+            transports: ["websocket", "polling"],
+        });
         socketRef.current = socket;
 
         socket.on("connect", () => {
