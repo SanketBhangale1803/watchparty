@@ -854,25 +854,27 @@ export const Room = ({
                 display: "flex",
                 overflow: "hidden",
                 minHeight: 0,
+                gap: "0.75rem",
+                padding: "0.75rem",
             }}>
-                {/* Video grid */}
+                {/* Center: Main display (screen share or grid) */}
                 <div style={{
                     flex: 1,
                     display: "flex",
                     flexDirection: "column",
                     overflow: "hidden",
-                    padding: showParticipants ? "0.75rem" : "0.75rem 0.75rem 0.75rem 0.75rem",
-                    gap: sharingParticipant ? "0.75rem" : "0",
+                    borderRadius: "0.75rem",
+                    background: "#1e293b",
                 }}>
-                    {/* Screen share large view */}
+                    {/* Screen share view */}
                     {sharingParticipant && (
                         <div style={{
-                            flex: "2",
-                            minHeight: "200px",
+                            flex: 1,
                             position: "relative",
-                            borderRadius: "0.75rem",
-                            overflow: "hidden",
-                            background: "#1e293b",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            background: "#000",
                         }}>
                             {sharingParticipant.isLocal ? (
                                 <video
@@ -884,272 +886,228 @@ export const Room = ({
                                         width: "100%",
                                         height: "100%",
                                         objectFit: "contain",
-                                        background: "#000",
                                     }}
                                 />
                             ) : (
                                 <ParticipantVideo
                                     stream={remoteParticipants.find(p => p.id === sharingParticipant.id)?.displayStream || null}
-                                    label={`${sharingParticipant.name} (Sharing Screen)`}
+                                    label={`${sharingParticipant.name} is sharing`}
                                     prioritized
                                     muted
                                 />
                             )}
-                            <div className="tile-label">
+                            <div className="tile-label" style={{ zIndex: 10 }}>
                                 {sharingParticipant.isLocal ? "Your Screen" : `${sharingParticipant.name}'s Screen`}
                             </div>
                         </div>
                     )}
 
-                    {/* Participants grid */}
-                    <div style={{
-                        flex: sharingParticipant ? "1" : "1",
-                        display: "grid",
-                        gridTemplateColumns: gridCols,
-                        gap: "0.75rem",
-                        gridAutoRows: "1fr",
-                        minHeight: 0,
-                    }}>
-                        {allTiles.map((tile) => {
-                            if (sharingParticipant && tile.id === sharingParticipant.id) return null;
-                            const remoteP = remoteParticipants.find((p) => p.id === tile.id);
-                            const isSharing = tile.id === "self" ? isScreenSharing : (remoteP?.isSharingScreen ?? false);
-                            return (
-                                <ParticipantVideo
-                                    key={tile.id}
-                                    stream={tile.displayStream}
-                                    label={tile.name}
-                                    mirrored={tile.isLocal}
-                                    muted={tile.isLocal}
-                                    isLocal={tile.isLocal}
-                                    prioritized={isSharing}
-                                />
-                            );
-                        })}
-                    </div>
-
-                    {/* Control bar */}
-                    <div style={{
-                        display: "flex",
-                        justifyContent: "center",
-                        alignItems: "center",
-                        gap: "0.75rem",
-                        padding: "1rem 0 0.5rem",
-                        flexShrink: 0,
-                    }}>
-                        <button
-                            onClick={handleToggleMic}
-                            style={{
-                                width: "52px",
-                                height: "52px",
-                                borderRadius: "50%",
-                                border: "none",
-                                cursor: "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: "1.35rem",
-                                background: micEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
-                                color: "white",
-                                transition: "all 0.2s",
-                            }}
-                            title={micEnabled ? "Mute" : "Unmute"}
-                        >
-                            {micEnabled ? "🎤" : "🔇"}
-                        </button>
-
-                        <button
-                            onClick={handleToggleCam}
-                            style={{
-                                width: "52px",
-                                height: "52px",
-                                borderRadius: "50%",
-                                border: "none",
-                                cursor: "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: "1.35rem",
-                                background: camEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
-                                color: "white",
-                                transition: "all 0.2s",
-                            }}
-                            title={camEnabled ? "Stop camera" : "Start camera"}
-                        >
-                            {camEnabled ? "📹" : "📷"}
-                        </button>
-
-                        <button
-                            onClick={toggleScreenShare}
-                            style={{
-                                width: "52px",
-                                height: "52px",
-                                borderRadius: "50%",
-                                border: "none",
-                                cursor: "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: "1.35rem",
-                                background: isScreenSharing ? "var(--success)" : "rgba(255,255,255,0.12)",
-                                color: "white",
-                                transition: "all 0.2s",
-                            }}
-                            title={isScreenSharing ? "Stop sharing" : "Share screen"}
-                        >
-                            🖥
-                        </button>
-
-                        <button
-                            onClick={toggleFullscreen}
-                            style={{
-                                width: "52px",
-                                height: "52px",
-                                borderRadius: "50%",
-                                border: "none",
-                                cursor: "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: "1.35rem",
-                                background: "rgba(255,255,255,0.12)",
-                                color: "white",
-                                transition: "all 0.2s",
-                            }}
-                            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-                        >
-                            {isFullscreen ? "⤓" : "⤢"}
-                        </button>
-
-                        <button
-                            onClick={handleLeave}
-                            style={{
-                                width: "52px",
-                                height: "52px",
-                                borderRadius: "50%",
-                                border: "none",
-                                cursor: "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: "1.35rem",
-                                background: "var(--danger)",
-                                color: "white",
-                                transition: "all 0.2s",
-                            }}
-                            title="Leave"
-                        >
-                            📞
-                        </button>
-                    </div>
+                    {/* Regular grid when no sharing */}
+                    {!sharingParticipant && (
+                        <div style={{
+                            flex: 1,
+                            display: "grid",
+                            gridTemplateColumns: gridCols,
+                            gap: "0.75rem",
+                            gridAutoRows: "1fr",
+                            padding: "0.75rem",
+                            minHeight: 0,
+                            alignContent: "start",
+                        }}>
+                            {allTiles.map((tile) => {
+                                return (
+                                    <ParticipantVideo
+                                        key={tile.id}
+                                        stream={tile.displayStream}
+                                        label={tile.name}
+                                        mirrored={tile.isLocal}
+                                        muted={tile.isLocal}
+                                        isLocal={tile.isLocal}
+                                    />
+                                );
+                            })}
+                        </div>
+                    )}
                 </div>
 
-                {/* Participant sidebar */}
-                {showParticipants && (
+                {/* Right panel: All participants' videos (docked) */}
+                <div style={{
+                    width: "240px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.5rem",
+                    overflow: "hidden",
+                    flexShrink: 0,
+                }}>
                     <div style={{
-                        width: "280px",
-                        background: "rgba(15, 23, 42, 0.95)",
-                        borderLeft: "1px solid rgba(255,255,255,0.08)",
+                        fontSize: "0.75rem",
+                        color: "#94a3b8",
+                        padding: "0.25rem 0",
+                        textAlign: "center",
+                        flexShrink: 0,
+                    }}>
+                        Participants ({allTiles.length})
+                    </div>
+                    <div style={{
+                        flex: 1,
                         display: "flex",
                         flexDirection: "column",
-                        flexShrink: 0,
-                        overflow: "hidden",
+                        gap: "0.5rem",
+                        overflow: "auto",
+                        paddingRight: "2px",
                     }}>
+                        {/* Local video */}
                         <div style={{
-                            padding: "1rem 1.25rem",
-                            borderBottom: "1px solid rgba(255,255,255,0.08)",
+                            width: "100%",
+                            aspectRatio: "16/9",
+                            borderRadius: "0.5rem",
+                            overflow: "hidden",
                             flexShrink: 0,
                         }}>
-                            <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white", margin: 0 }}>
-                                Participants ({totalParticipants})
-                            </h3>
+                            <ParticipantVideo
+                                stream={localStreamRef.current}
+                                label={name}
+                                mirrored
+                                muted
+                                isLocal
+                            />
                         </div>
-                        <div style={{ flex: 1, overflowY: "auto", padding: "0.5rem 0" }}>
-                            {/* Local user */}
-                            <div style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.75rem",
-                                padding: "0.625rem 1.25rem",
+
+                        {/* Remote videos */}
+                        {remoteParticipants.map((p) => (
+                            <div key={p.id} style={{
+                                width: "100%",
+                                aspectRatio: "16/9",
+                                borderRadius: "0.5rem",
+                                overflow: "hidden",
+                                flexShrink: 0,
                             }}>
-                                <div style={{
-                                    width: "36px",
-                                    height: "36px",
-                                    borderRadius: "50%",
-                                    background: "linear-gradient(135deg, var(--primary), #7c3aed)",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    color: "white",
-                                    fontWeight: 600,
-                                    fontSize: "0.9rem",
-                                    flexShrink: 0,
-                                }}>
-                                    {name.charAt(0).toUpperCase()}
-                                </div>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                    <p style={{ fontSize: "0.875rem", fontWeight: 600, color: "white", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                        {name} (You)
-                                    </p>
-                                </div>
-                                <div style={{ display: "flex", gap: "0.35rem" }}>
-                                    <span title={micEnabled ? "Mic on" : "Mic off"} style={{ fontSize: "0.9rem" }}>
-                                        {micEnabled ? "🎤" : "🔇"}
-                                    </span>
-                                    <span title={camEnabled ? "Camera on" : "Camera off"} style={{ fontSize: "0.9rem" }}>
-                                        {camEnabled ? "📹" : "📷"}
-                                    </span>
-                                </div>
+                                <ParticipantVideo
+                                    stream={p.displayStream}
+                                    label={p.name}
+                                    muted
+                                />
                             </div>
-
-                            {/* Remote participants */}
-                            {remoteParticipants.map((p) => (
-                                <div key={p.id} style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "0.75rem",
-                                    padding: "0.625rem 1.25rem",
-                                }}>
-                                    <div style={{
-                                        width: "36px",
-                                        height: "36px",
-                                        borderRadius: "50%",
-                                        background: "linear-gradient(135deg, #64748b, #475569)",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        color: "white",
-                                        fontWeight: 600,
-                                        fontSize: "0.9rem",
-                                        flexShrink: 0,
-                                    }}>
-                                        {p.name.charAt(0).toUpperCase()}
-                                    </div>
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                        <p style={{ fontSize: "0.875rem", fontWeight: 600, color: "white", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                            {p.name}
-                                        </p>
-                                    </div>
-                                    <div style={{ display: "flex", gap: "0.35rem" }}>
-                                        <span style={{ fontSize: "0.9rem" }}>🎤</span>
-                                        <span style={{ fontSize: "0.9rem" }}>📹</span>
-                                    </div>
-                                </div>
-                            ))}
-
-                            {remoteParticipants.length === 0 && (
-                                <div style={{
-                                    padding: "2rem 1.25rem",
-                                    textAlign: "center",
-                                    color: "#64748b",
-                                    fontSize: "0.875rem",
-                                }}>
-                                    Waiting for others to join...
-                                </div>
-                            )}
-                        </div>
+                        ))}
                     </div>
-                )}
+                </div>
+            </div>
+
+            {/* Control bar - outside main content */}
+            <div style={{
+                display: "flex",
+                justifyContent: "center",
+                alignItems: "center",
+                gap: "0.75rem",
+                padding: "0.75rem",
+                background: "rgba(15, 23, 42, 0.95)",
+                borderTop: "1px solid rgba(255,255,255,0.08)",
+                flexShrink: 0,
+            }}>
+                <button
+                    onClick={handleToggleMic}
+                    style={{
+                        width: "52px",
+                        height: "52px",
+                        borderRadius: "50%",
+                        border: "none",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "1.35rem",
+                        background: micEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
+                        color: "white",
+                        transition: "all 0.2s",
+                    }}
+                    title={micEnabled ? "Mute" : "Unmute"}
+                >
+                    {micEnabled ? "🎤" : "🔇"}
+                </button>
+
+                <button
+                    onClick={handleToggleCam}
+                    style={{
+                        width: "52px",
+                        height: "52px",
+                        borderRadius: "50%",
+                        border: "none",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "1.35rem",
+                        background: camEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
+                        color: "white",
+                        transition: "all 0.2s",
+                    }}
+                    title={camEnabled ? "Stop camera" : "Start camera"}
+                >
+                    {camEnabled ? "📹" : "📷"}
+                </button>
+
+                <button
+                    onClick={toggleScreenShare}
+                    style={{
+                        width: "52px",
+                        height: "52px",
+                        borderRadius: "50%",
+                        border: "none",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "1.35rem",
+                        background: isScreenSharing ? "var(--success)" : "rgba(255,255,255,0.12)",
+                        color: "white",
+                        transition: "all 0.2s",
+                    }}
+                    title={isScreenSharing ? "Stop sharing" : "Share screen"}
+                >
+                    🖥
+                </button>
+
+                <button
+                    onClick={toggleFullscreen}
+                    style={{
+                        width: "52px",
+                        height: "52px",
+                        borderRadius: "50%",
+                        border: "none",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "1.35rem",
+                        background: "rgba(255,255,255,0.12)",
+                        color: "white",
+                        transition: "all 0.2s",
+                    }}
+                    title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                >
+                    {isFullscreen ? "⤓" : "⤢"}
+                </button>
+
+                <button
+                    onClick={handleLeave}
+                    style={{
+                        width: "52px",
+                        height: "52px",
+                        borderRadius: "50%",
+                        border: "none",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "1.35rem",
+                        background: "var(--danger)",
+                        color: "white",
+                        transition: "all 0.2s",
+                    }}
+                    title="Leave"
+                >
+                    📞
+                </button>
             </div>
 
             {/* Hidden audio players */}
