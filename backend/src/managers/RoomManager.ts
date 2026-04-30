@@ -48,6 +48,12 @@ export class RoomManager {
         }
 
         if (room.participants.has(user.socket.id)) {
+            user.socket.emit("room-joined", {
+                roomId,
+                participants: [...room.participants]
+                    .filter(([id]) => id !== user.socket.id)
+                    .map(([, p]) => ({ id: p.socket.id, name: p.name })),
+            });
             return true;
         }
 

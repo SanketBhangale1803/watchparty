@@ -222,6 +222,14 @@ export const Room = ({
     const socketRef = useRef<Socket | null>(null);
     const socketIdRef = useRef<string | null>(null);
     const currentRoomIdRef = useRef<string | null>(null);
+    const demoRoomIdRef = useRef(demoRoomId);
+    const nameRef = useRef(name);
+
+    demoRoomIdRef.current = demoRoomId;
+    nameRef.current = name;
+
+    /** Server-assigned ID, or the ID you typed while joining (until `room-joined` arrives). */
+    const displayedRoomId = currentRoomId ?? (demoRoomId?.trim() || null);
 
     const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
     const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
@@ -650,8 +658,9 @@ export const Room = ({
 
         socket.on("connect", () => {
             socketIdRef.current = socket.id ?? null;
-            if (demoRoomId) socket.emit("join-room", { roomId: demoRoomId, name });
-            else socket.emit("create-room", { name });
+            const joinId = demoRoomIdRef.current?.trim();
+            if (joinId) socket.emit("join-room", { roomId: joinId, name: nameRef.current });
+            else socket.emit("create-room", { name: nameRef.current });
         });
 
         socket.on("disconnect", () => {
@@ -873,6 +882,11 @@ export const Room = ({
         }
     }, [localVideoTrack]);
 
+    const handleCopyRoomId = useCallback(() => {
+        if (!displayedRoomId) return;
+        navigator.clipboard.writeText(displayedRoomId).catch(() => undefined);
+    }, [displayedRoomId]);
+
     const handleLeave = useCallback(() => {
         stopScreenShare();
         peersRef.current.forEach((pc) => pc.close());
@@ -929,12 +943,53 @@ export const Room = ({
                     }}>
                         ▶
                     </div>
-                    <div>
-                        <h2 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white" }}>Closr</h2>
-                        {currentRoomId && (
-                            <p style={{ fontSize: "0.75rem", color: "#94a3b8", margin: 0 }}>
-                                Room: <strong style={{ color: "#e2e8f0" }}>{currentRoomId}</strong>
-                            </p>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", minWidth: 0 }}>
+                        <h2 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white", margin: 0 }}>
+                            Closr
+                        </h2>
+                        {displayedRoomId && (
+                            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.5rem" }}>
+                                <span style={{ fontSize: "0.7rem", color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                                    Room ID
+                                </span>
+                                <code
+                                    style={{
+                                        fontSize: "1rem",
+                                        fontWeight: 600,
+                                        color: "#f8fafc",
+                                        letterSpacing: "0.06em",
+                                        background: "rgba(255,255,255,0.08)",
+                                        border: "1px solid rgba(255,255,255,0.14)",
+                                        borderRadius: "6px",
+                                        padding: "2px 8px",
+                                        maxWidth: "min(260px, 45vw)",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap",
+                                        display: "inline-block",
+                                        verticalAlign: "middle",
+                                    }}
+                                    title={displayedRoomId}
+                                >
+                                    {displayedRoomId}
+                                </code>
+                                <button
+                                    type="button"
+                                    onClick={handleCopyRoomId}
+                                    style={{
+                                        fontSize: "0.72rem",
+                                        padding: "0.25rem 0.55rem",
+                                        borderRadius: "6px",
+                                        border: "1px solid rgba(255,255,255,0.2)",
+                                        background: "rgba(255,255,255,0.1)",
+                                        color: "#e2e8f0",
+                                        cursor: "pointer",
+                                        fontWeight: 600,
+                                    }}
+                                >
+                                    Copy
+                                </button>
+                            </div>
                         )}
                     </div>
                 </div>
