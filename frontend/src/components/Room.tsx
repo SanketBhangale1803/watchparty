@@ -18,24 +18,24 @@ type ParticipantState = {
     screenTrackId: string | null;
 };
 
-// ---------------------------------------------------------------------------
-// ParticipantVideo — stable video element that avoids flicker on stream swap
-// ---------------------------------------------------------------------------
 const ParticipantVideo = ({
     stream,
     label,
     prioritized,
     mirrored,
     muted = false,
+    isLocal = false,
 }: {
     stream: MediaStream | null;
     label: string;
     prioritized?: boolean;
     mirrored?: boolean;
     muted?: boolean;
+    isLocal?: boolean;
 }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isVideoReady, setIsVideoReady] = useState(false);
+    const [hasVideo, setHasVideo] = useState(true);
 
     useEffect(() => {
         const video = videoRef.current;
@@ -43,23 +43,30 @@ const ParticipantVideo = ({
         setIsVideoReady(false);
         video.srcObject = stream;
         if (stream) {
+            const hasVidTracks = stream.getVideoTracks().length > 0;
+            setHasVideo(hasVidTracks);
             video.play().catch(() => undefined);
         } else {
             setIsVideoReady(true);
+            setHasVideo(false);
         }
     }, [stream]);
 
     return (
         <div
-            className="video-container"
+            className="video-tile"
             style={{
-                width: "100%",
-                height: "100%",
-                border: prioritized ? "2px solid var(--success)" : "1px solid var(--border)",
-                borderRadius: "0.75rem",
+                border: prioritized ? "2px solid var(--success)" : isLocal ? "2px solid var(--primary)" : "1px solid var(--border)",
                 transition: "border-color 220ms ease, box-shadow 220ms ease",
             }}
         >
+            {!hasVideo && (
+                <div className="video-placeholder">
+                    <div className="avatar">
+                        {label.charAt(0).toUpperCase()}
+                    </div>
+                </div>
+            )}
             <video
                 ref={videoRef}
                 autoPlay
@@ -70,25 +77,24 @@ const ParticipantVideo = ({
                     width: "100%",
                     height: "100%",
                     objectFit: "cover",
-                    background: "#000",
                     transform: mirrored ? "scaleX(-1)" : "none",
-                    opacity: isVideoReady ? 1 : 0,
+                    opacity: isVideoReady && hasVideo ? 1 : 0,
                     transition: "opacity 220ms ease",
+                    position: "absolute",
+                    inset: 0,
                 }}
             />
-            <div className="badge">{label}</div>
+            <div className="tile-label">
+                {label}
+                {isLocal && <span className="you-badge">You</span>}
+            </div>
         </div>
     );
 };
 
-// ---------------------------------------------------------------------------
-// ParticipantAudio — Web Audio boosted audio output for a remote stream.
-// FIX: We now pass `displayStream` which already contains all audio tracks
-// (camera mic + screen audio merged), so everything plays together.
-// ---------------------------------------------------------------------------
 const ParticipantAudio = ({
     stream,
-    boost = 3.0,
+    boost = 1.0,
 }: {
     stream: MediaStream | null;
     boost?: number;
@@ -114,9 +120,6 @@ const ParticipantAudio = ({
     return null;
 };
 
-// ---------------------------------------------------------------------------
-// Room
-// ---------------------------------------------------------------------------
 export const Room = ({
     name,
     localAudioTrack,
@@ -128,16 +131,18 @@ export const Room = ({
     localVideoTrack: MediaStreamTrack | null;
     demoRoomId?: string;
 }) => {
-    const [lobby, setLobby] = useState(true);
+    const [, setLobby] = useState(true);
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
     const [participants, setParticipants] = useState<ParticipantState[]>([]);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [, setScreenPreviewStream] = useState<MediaStream | null>(null);
 
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [showParticipants, setShowParticipants] = useState(false);
+    const [micEnabled, setMicEnabled] = useState(true);
+    const [camEnabled, setCamEnabled] = useState(true);
 
     const containerRef = useRef<HTMLDivElement>(null);
-    const localCameraPreviewRef = useRef<HTMLVideoElement>(null);
     const localScreenPreviewRef = useRef<HTMLVideoElement>(null);
 
     const socketRef = useRef<Socket | null>(null);
@@ -163,18 +168,10 @@ export const Room = ({
     const cameraSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
     const audioSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
     const syncParticipants = useCallback(() => {
         setParticipants(Array.from(participantStateRef.current.values()));
     }, []);
 
-    /**
-     * FIX: updateDisplayedStream now merges ALL audio tracks (camera mic +
-     * screen audio) into displayStream so ParticipantAudio plays everything.
-     * Video selection logic: prefer screen track when sharing, else camera.
-     */
     const updateDisplayedStream = useCallback((participantId: string) => {
         const participant = participantStateRef.current.get(participantId);
         if (!participant) return;
@@ -187,17 +184,14 @@ export const Room = ({
             : null;
         const cameraTrack = allVideoTracks.find((t) => t.id !== participant.screenTrackId) ?? null;
 
-        // Which video to show in the main display slot
         const selectedVideoTrack = participant.isSharingScreen
             ? screenTrack || cameraTrack
             : cameraTrack || screenTrack;
 
-        // displayStream = chosen video + ALL audio (mic + screen audio)
         const nextDisplayStream = new MediaStream();
         if (selectedVideoTrack) nextDisplayStream.addTrack(selectedVideoTrack);
         allAudioTracks.forEach((t) => nextDisplayStream.addTrack(t));
 
-        // cameraStream = just the camera video (shown in sidebar pip)
         const nextCameraStream = new MediaStream();
         if (cameraTrack) {
             nextCameraStream.addTrack(cameraTrack);
@@ -281,14 +275,14 @@ export const Room = ({
             if (micTrack) {
                 const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
                 const micGain = audioContext.createGain();
-                micGain.gain.value = 1.6;
+                micGain.gain.value = 1.0;
                 micSource.connect(micGain);
                 micGain.connect(compressor);
             }
 
             const screenSource = audioContext.createMediaStreamSource(new MediaStream([screenAudioTrack]));
             const screenGain = audioContext.createGain();
-            screenGain.gain.value = 0.7;
+            screenGain.gain.value = 0.8;
             screenSource.connect(screenGain);
             screenGain.connect(compressor);
 
@@ -305,9 +299,6 @@ export const Room = ({
         [disposeMixedAudio]
     );
 
-    // -----------------------------------------------------------------------
-    // Fullscreen
-    // -----------------------------------------------------------------------
     const toggleFullscreen = useCallback(async () => {
         if (!containerRef.current) return;
         try {
@@ -329,9 +320,6 @@ export const Room = ({
         return () => document.removeEventListener("fullscreenchange", handler);
     }, []);
 
-    // -----------------------------------------------------------------------
-    // WebRTC helpers
-    // -----------------------------------------------------------------------
     const createAndSendOffer = useCallback(async (peerId: string) => {
         const socket = socketRef.current;
         const roomId = currentRoomIdRef.current;
@@ -386,7 +374,6 @@ export const Room = ({
             });
             peersRef.current.set(peerId, pc);
 
-            // Add camera + mic tracks with stable sender references.
             const initialVideoTrack = localStreamRef.current.getVideoTracks()[0] ?? null;
             if (initialVideoTrack) {
                 const cameraSender = pc.addTrack(initialVideoTrack, localStreamRef.current);
@@ -399,7 +386,6 @@ export const Room = ({
                 audioSendersRef.current.set(peerId, audioSender);
             }
 
-            // Add screen tracks if already sharing
             if (screenStreamRef.current && screenVideoTrackRef.current) {
                 const s = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
                 screenVideoSendersRef.current.set(peerId, s);
@@ -451,9 +437,6 @@ export const Room = ({
         [createAndSendOffer, removeParticipant, upsertParticipantStream]
     );
 
-    // -----------------------------------------------------------------------
-    // Screen share
-    // -----------------------------------------------------------------------
     const stopScreenShare = useCallback(() => {
         const screenStream = screenStreamRef.current;
 
@@ -473,18 +456,14 @@ export const Room = ({
         emitScreenShareStatus(false, null);
     }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, syncOutboundAudioTrack]);
 
-    /**
-     * FIX: startScreenShare now correctly sends screen audio to peers and
-     * also plays screen audio locally via Web Audio so the sharer hears it.
-     */
     const startScreenShare = useCallback(async () => {
         try {
             const stream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
                 audio: {
-                    // Request system audio / tab audio
-                    echoCancellation: false,
-                    noiseSuppression: false,
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
                     sampleRate: 44100,
                 },
             });
@@ -502,22 +481,18 @@ export const Room = ({
             screenAudioTrackRef.current = audioTrack;
             syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, audioTrack));
 
-            // Show local preview of the screen
             const previewStream = new MediaStream([videoTrack]);
             setScreenPreviewStream(previewStream);
             setIsScreenSharing(true);
 
-            // FIX: play local screen preview in the dedicated video element
             if (localScreenPreviewRef.current) {
                 localScreenPreviewRef.current.srcObject = previewStream;
                 localScreenPreviewRef.current.play().catch(() => undefined);
             }
 
-            // Send screen tracks to all existing peers
             peersRef.current.forEach((pc, peerId) => {
                 const vs = pc.addTrack(videoTrack, stream);
                 screenVideoSendersRef.current.set(peerId, vs);
-
                 createAndSendOffer(peerId);
             });
 
@@ -534,9 +509,6 @@ export const Room = ({
         else startScreenShare();
     }, [isScreenSharing, startScreenShare, stopScreenShare]);
 
-    // -----------------------------------------------------------------------
-    // Local tracks — update senders when cam/mic changes
-    // -----------------------------------------------------------------------
     useEffect(() => {
         const nextAudioTrack = buildOutboundAudioTrack(localAudioTrack, screenAudioTrackRef.current);
         const nextLocalStream = new MediaStream();
@@ -544,11 +516,6 @@ export const Room = ({
         if (nextAudioTrack) nextLocalStream.addTrack(nextAudioTrack);
         localStreamRef.current = nextLocalStream;
         outboundAudioTrackRef.current = nextAudioTrack;
-
-        if (localCameraPreviewRef.current) {
-            localCameraPreviewRef.current.srcObject = new MediaStream(localVideoTrack ? [localVideoTrack] : []);
-            localCameraPreviewRef.current.play().catch(() => undefined);
-        }
 
         peersRef.current.forEach((pc, peerId) => {
             const camSender = cameraSendersRef.current.get(peerId);
@@ -578,9 +545,6 @@ export const Room = ({
         });
     }, [buildOutboundAudioTrack, createAndSendOffer, localAudioTrack, localVideoTrack]);
 
-    // -----------------------------------------------------------------------
-    // Socket.io
-    // -----------------------------------------------------------------------
     useEffect(() => {
         const socket = io(URL);
         socketRef.current = socket;
@@ -743,285 +707,405 @@ export const Room = ({
         };
     }, [disposeMixedAudio]);
 
-    // -----------------------------------------------------------------------
-    // Layout logic
-    //
-    // No screen sharing active:
-    //   Main  = remote participant's camera (full view)
-    //   Sidebar = local camera only (remote is NOT duplicated in sidebar)
-    //
-    // Screen sharing active (local OR remote):
-    //   Main  = shared screen
-    //   Sidebar = local camera + remote camera pip (slides in smoothly)
-    // -----------------------------------------------------------------------
-
     const remoteParticipants = useMemo(
         () => participants.filter((p) => p.id !== socketIdRef.current),
         [participants]
     );
 
-    const remoteSharingParticipant = useMemo(
-        () => remoteParticipants.find((p) => p.isSharingScreen) ?? null,
-        [remoteParticipants]
-    );
+    const allTiles = useMemo(() => {
+        const tiles = [{ id: "self", name, displayStream: localStreamRef.current, isLocal: true }];
+        remoteParticipants.forEach((p) => {
+            tiles.push({ id: p.id, name: p.name, displayStream: p.displayStream, isLocal: false });
+        });
+        return tiles;
+    }, [name, remoteParticipants]);
 
-    // anyoneSharing = local or remote is sharing
-    const anyoneSharing = isScreenSharing || !!remoteSharingParticipant;
+    const gridCols = useMemo(() => {
+        const count = allTiles.length;
+        if (count <= 1) return "1fr";
+        if (count === 2) return "1fr 1fr";
+        if (count <= 4) return "1fr 1fr";
+        if (count <= 6) return "1fr 1fr 1fr";
+        if (count <= 9) return "1fr 1fr 1fr";
+        return "1fr 1fr 1fr 1fr";
+    }, [allTiles.length]);
 
-    // Main panel:
-    //   - If WE share → show our screen (via always-mounted video ref, shown via CSS)
-    //   - If REMOTE shares → show their screen
-    //   - Nobody sharing → show first remote's camera
-    const mainPanelParticipant = useMemo(() => {
-        if (isScreenSharing) return null;           // our screen shown via ref
-        if (remoteSharingParticipant) return remoteSharingParticipant;
-        return remoteParticipants[0] ?? null;
-    }, [isScreenSharing, remoteSharingParticipant, remoteParticipants]);
+    const totalParticipants = 1 + remoteParticipants.length;
 
-    // Sidebar remote tiles:
-    //   - When sharing is active: show every remote's camera pip
-    //   - When NOT sharing: hide remotes from sidebar (they're in main panel)
-    const sidebarRemotes = useMemo(() => {
-        if (!anyoneSharing) return [];   // remote is in main panel, don't duplicate
-        return remoteParticipants;       // show camera pip for all remotes
-    }, [anyoneSharing, remoteParticipants]);
+    const handleToggleMic = useCallback(() => {
+        if (localAudioTrack) {
+            localAudioTrack.enabled = !localAudioTrack.enabled;
+            setMicEnabled(localAudioTrack.enabled);
+        }
+    }, [localAudioTrack]);
+
+    const handleToggleCam = useCallback(() => {
+        if (localVideoTrack) {
+            localVideoTrack.enabled = !localVideoTrack.enabled;
+            setCamEnabled(localVideoTrack.enabled);
+        }
+    }, [localVideoTrack]);
+
+    const handleLeave = useCallback(() => {
+        stopScreenShare();
+        peersRef.current.forEach((pc) => pc.close());
+        peersRef.current.clear();
+        remoteStreamsRef.current.clear();
+        participantStateRef.current.clear();
+        screenStatusRef.current.clear();
+        makingOfferRef.current.clear();
+        cameraSendersRef.current.clear();
+        audioSendersRef.current.clear();
+        disposeMixedAudio();
+        socketRef.current?.disconnect();
+        socketRef.current = null;
+        window.location.reload();
+    }, [stopScreenShare, disposeMixedAudio]);
 
     return (
-        /*
-         * Root container: 100vw wide, never overflows horizontally.
-         * display:flex + flex:1 on the grid div means the grid fills
-         * all remaining vertical space without a hard-coded height.
-         */
         <div
             ref={containerRef}
             style={{
                 width: "100%",
                 maxWidth: "100vw",
-                minHeight: "100vh",
+                height: "100vh",
                 overflow: "hidden",
                 boxSizing: "border-box",
-                backgroundColor: isFullscreen ? "#000" : "var(--bg-main)",
-                padding: "0.75rem 1rem",
+                backgroundColor: isFullscreen ? "#000" : "#0f172a",
                 display: "flex",
                 flexDirection: "column",
-                gap: "0.75rem",
             }}
         >
             {/* Header */}
-            <div style={{ textAlign: "center", flexShrink: 0 }}>
-                <h2 style={{ fontSize: "1.2rem", fontWeight: 700 }}>Hi, {name}</h2>
-                {lobby && !currentRoomId && (
-                    <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Generating room…</p>
-                )}
-                {lobby && currentRoomId && (
-                    <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                        Waiting for others… Room ID: <strong>{currentRoomId}</strong>
-                    </p>
-                )}
-                {!lobby && currentRoomId && (
-                    <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                        Room ID: <strong>{currentRoomId}</strong>
-                    </p>
-                )}
-            </div>
-
-            {/*
-             * Main grid — flex:1 makes it consume all leftover vertical space.
-             * gridTemplateColumns: sidebar is fixed 240px; main panel takes the rest
-             * via minmax(0,1fr) — the minmax(0,...) is critical, it prevents the
-             * main column from blowing out past the container width.
-             */}
-            <div
-                style={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) 240px",
-                    gridTemplateRows: "1fr",
-                    gap: "0.75rem",
-                    flex: 1,
-                    minHeight: 0,        /* required so flex child can shrink */
-                    width: "100%",
-                    overflow: "hidden",
-                }}
-            >
-                {/* ── Main panel ── */}
-                <div style={{ position: "relative", minHeight: 0, overflow: "hidden", borderRadius: "0.75rem" }}>
-                    {/* Local screen share — always mounted, shown via CSS opacity */}
-                    <div
-                        className="video-container"
+            <div style={{
+                padding: "0.75rem 1.25rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                background: "rgba(15, 23, 42, 0.9)",
+                backdropFilter: "blur(8px)",
+                borderBottom: "1px solid rgba(255,255,255,0.08)",
+                flexShrink: 0,
+                zIndex: 10,
+            }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                    <div style={{
+                        width: "32px",
+                        height: "32px",
+                        borderRadius: "8px",
+                        background: "linear-gradient(135deg, var(--primary), #7c3aed)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "white",
+                        fontSize: "0.9rem",
+                    }}>
+                        ▶
+                    </div>
+                    <div>
+                        <h2 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white" }}>WatchParty</h2>
+                        {currentRoomId && (
+                            <p style={{ fontSize: "0.75rem", color: "#94a3b8", margin: 0 }}>
+                                Room: <strong style={{ color: "#e2e8f0" }}>{currentRoomId}</strong>
+                            </p>
+                        )}
+                    </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                    <span style={{ fontSize: "0.85rem", color: "#94a3b8" }}>
+                        {totalParticipants} {totalParticipants === 1 ? "participant" : "participants"}
+                    </span>
+                    <button
+                        onClick={() => setShowParticipants(!showParticipants)}
                         style={{
-                            position: "absolute",
-                            inset: 0,
-                            border: "2px solid var(--success)",
-                            borderRadius: "0.75rem",
-                            opacity: isScreenSharing ? 1 : 0,
-                            pointerEvents: isScreenSharing ? "auto" : "none",
-                            transition: "opacity 300ms ease",
-                            zIndex: isScreenSharing ? 2 : 0,
+                            background: showParticipants ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
+                            border: "1px solid rgba(255,255,255,0.12)",
+                            borderRadius: "8px",
+                            padding: "0.5rem 0.75rem",
+                            color: "white",
+                            cursor: "pointer",
+                            fontSize: "0.85rem",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "0.5rem",
+                            transition: "all 0.2s",
                         }}
                     >
-                        <video
-                            ref={localScreenPreviewRef}
-                            autoPlay
-                            muted
-                            playsInline
-                            style={{
-                                width: "100%",
-                                height: "100%",
-                                objectFit: "contain",
-                                background: "#000",
-                            }}
-                        />
-                        <div className="badge">Your Screen</div>
+                        👥 Participants
+                    </button>
+                </div>
+            </div>
+
+            {/* Main content area */}
+            <div style={{
+                flex: 1,
+                display: "flex",
+                overflow: "hidden",
+                minHeight: 0,
+            }}>
+                {/* Video grid */}
+                <div style={{
+                    flex: 1,
+                    display: "flex",
+                    flexDirection: "column",
+                    overflow: "hidden",
+                    padding: showParticipants ? "0.75rem" : "0.75rem 0.75rem 0.75rem 0.75rem",
+                }}>
+                    <div style={{
+                        flex: 1,
+                        display: "grid",
+                        gridTemplateColumns: gridCols,
+                        gap: "0.75rem",
+                        gridAutoRows: "1fr",
+                        minHeight: 0,
+                    }}>
+                        {allTiles.map((tile) => {
+                            const remoteP = remoteParticipants.find((p) => p.id === tile.id);
+                            const isSharing = tile.id === "self" ? isScreenSharing : (remoteP?.isSharingScreen ?? false);
+                            return (
+                                <ParticipantVideo
+                                    key={tile.id}
+                                    stream={tile.displayStream}
+                                    label={tile.name}
+                                    mirrored={tile.isLocal}
+                                    muted={tile.isLocal}
+                                    isLocal={tile.isLocal}
+                                    prioritized={isSharing}
+                                />
+                            );
+                        })}
                     </div>
 
-                    {/* Remote screen share */}
-                    {remoteSharingParticipant && (
-                        <div
+                    {/* Control bar */}
+                    <div style={{
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        gap: "0.75rem",
+                        padding: "1rem 0 0.5rem",
+                        flexShrink: 0,
+                    }}>
+                        <button
+                            onClick={handleToggleMic}
                             style={{
-                                position: "absolute",
-                                inset: 0,
-                                opacity: !isScreenSharing ? 1 : 0,
-                                transition: "opacity 300ms ease",
-                                zIndex: !isScreenSharing ? 2 : 0,
-                            }}
-                        >
-                            <ParticipantVideo
-                                stream={remoteSharingParticipant.displayStream}
-                                label={`${remoteSharingParticipant.name} (Sharing)`}
-                                prioritized
-                                muted
-                            />
-                        </div>
-                    )}
-
-                    {/* Remote camera — shown when nobody is sharing */}
-                    {mainPanelParticipant && !mainPanelParticipant.isSharingScreen && (
-                        <div
-                            style={{
-                                position: "absolute",
-                                inset: 0,
-                                opacity: !anyoneSharing ? 1 : 0,
-                                transition: "opacity 300ms ease",
-                                zIndex: !anyoneSharing ? 2 : 0,
-                            }}
-                        >
-                            <ParticipantVideo
-                                stream={mainPanelParticipant.displayStream}
-                                label={mainPanelParticipant.name}
-                                muted
-                            />
-                        </div>
-                    )}
-
-                    {/* Empty state */}
-                    {!mainPanelParticipant && !isScreenSharing && (
-                        <div
-                            style={{
-                                position: "absolute",
-                                inset: 0,
+                                width: "52px",
+                                height: "52px",
+                                borderRadius: "50%",
+                                border: "none",
+                                cursor: "pointer",
                                 display: "flex",
                                 alignItems: "center",
                                 justifyContent: "center",
-                                border: "1px solid var(--border)",
-                                borderRadius: "0.75rem",
-                                color: "var(--text-muted)",
+                                fontSize: "1.35rem",
+                                background: micEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
+                                color: "white",
+                                transition: "all 0.2s",
                             }}
+                            title={micEnabled ? "Mute" : "Unmute"}
                         >
-                            Waiting for participants…
-                        </div>
-                    )}
+                            {micEnabled ? "🎤" : "🔇"}
+                        </button>
+
+                        <button
+                            onClick={handleToggleCam}
+                            style={{
+                                width: "52px",
+                                height: "52px",
+                                borderRadius: "50%",
+                                border: "none",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "1.35rem",
+                                background: camEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
+                                color: "white",
+                                transition: "all 0.2s",
+                            }}
+                            title={camEnabled ? "Stop camera" : "Start camera"}
+                        >
+                            {camEnabled ? "📹" : "📷"}
+                        </button>
+
+                        <button
+                            onClick={toggleScreenShare}
+                            style={{
+                                width: "52px",
+                                height: "52px",
+                                borderRadius: "50%",
+                                border: "none",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "1.35rem",
+                                background: isScreenSharing ? "var(--success)" : "rgba(255,255,255,0.12)",
+                                color: "white",
+                                transition: "all 0.2s",
+                            }}
+                            title={isScreenSharing ? "Stop sharing" : "Share screen"}
+                        >
+                            🖥
+                        </button>
+
+                        <button
+                            onClick={toggleFullscreen}
+                            style={{
+                                width: "52px",
+                                height: "52px",
+                                borderRadius: "50%",
+                                border: "none",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "1.35rem",
+                                background: "rgba(255,255,255,0.12)",
+                                color: "white",
+                                transition: "all 0.2s",
+                            }}
+                            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                        >
+                            {isFullscreen ? "⤓" : "⤢"}
+                        </button>
+
+                        <button
+                            onClick={handleLeave}
+                            style={{
+                                width: "52px",
+                                height: "52px",
+                                borderRadius: "50%",
+                                border: "none",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "1.35rem",
+                                background: "var(--danger)",
+                                color: "white",
+                                transition: "all 0.2s",
+                            }}
+                            title="Leave"
+                        >
+                            📞
+                        </button>
+                    </div>
                 </div>
 
-                {/* ── Sidebar ── */}
-                <div
-                    style={{
+                {/* Participant sidebar */}
+                {showParticipants && (
+                    <div style={{
+                        width: "280px",
+                        background: "rgba(15, 23, 42, 0.95)",
+                        borderLeft: "1px solid rgba(255,255,255,0.08)",
                         display: "flex",
                         flexDirection: "column",
-                        gap: "0.75rem",
-                        minHeight: 0,
+                        flexShrink: 0,
                         overflow: "hidden",
-                    }}
-                >
-                    {/* Local camera — always visible in sidebar */}
-                    <div style={{ width: "100%", aspectRatio: "16 / 9", flexShrink: 0 }}>
-                        <div
-                            className="video-container"
-                            style={{
-                                height: "100%",
-                                border: isScreenSharing
-                                    ? "2px solid var(--success)"
-                                    : "1px solid var(--border)",
-                                transition: "border-color 220ms ease",
-                            }}
-                        >
-                            <video
-                                ref={localCameraPreviewRef}
-                                autoPlay
-                                muted
-                                playsInline
-                                style={{
-                                    width: "100%",
-                                    height: "100%",
-                                    objectFit: "cover",
-                                    background: "#000",
-                                    transform: "scaleX(-1)",
-                                }}
-                            />
-                            <div className="badge">You</div>
+                    }}>
+                        <div style={{
+                            padding: "1rem 1.25rem",
+                            borderBottom: "1px solid rgba(255,255,255,0.08)",
+                            flexShrink: 0,
+                        }}>
+                            <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white", margin: 0 }}>
+                                Participants ({totalParticipants})
+                            </h3>
+                        </div>
+                        <div style={{ flex: 1, overflowY: "auto", padding: "0.5rem 0" }}>
+                            {/* Local user */}
+                            <div style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.75rem",
+                                padding: "0.625rem 1.25rem",
+                            }}>
+                                <div style={{
+                                    width: "36px",
+                                    height: "36px",
+                                    borderRadius: "50%",
+                                    background: "linear-gradient(135deg, var(--primary), #7c3aed)",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    color: "white",
+                                    fontWeight: 600,
+                                    fontSize: "0.9rem",
+                                    flexShrink: 0,
+                                }}>
+                                    {name.charAt(0).toUpperCase()}
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <p style={{ fontSize: "0.875rem", fontWeight: 600, color: "white", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                        {name} (You)
+                                    </p>
+                                </div>
+                                <div style={{ display: "flex", gap: "0.35rem" }}>
+                                    <span title={micEnabled ? "Mic on" : "Mic off"} style={{ fontSize: "0.9rem" }}>
+                                        {micEnabled ? "🎤" : "🔇"}
+                                    </span>
+                                    <span title={camEnabled ? "Camera on" : "Camera off"} style={{ fontSize: "0.9rem" }}>
+                                        {camEnabled ? "📹" : "📷"}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Remote participants */}
+                            {remoteParticipants.map((p) => (
+                                <div key={p.id} style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: "0.75rem",
+                                    padding: "0.625rem 1.25rem",
+                                }}>
+                                    <div style={{
+                                        width: "36px",
+                                        height: "36px",
+                                        borderRadius: "50%",
+                                        background: "linear-gradient(135deg, #64748b, #475569)",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        color: "white",
+                                        fontWeight: 600,
+                                        fontSize: "0.9rem",
+                                        flexShrink: 0,
+                                    }}>
+                                        {p.name.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <p style={{ fontSize: "0.875rem", fontWeight: 600, color: "white", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                            {p.name}
+                                        </p>
+                                    </div>
+                                    <div style={{ display: "flex", gap: "0.35rem" }}>
+                                        <span style={{ fontSize: "0.9rem" }}>🎤</span>
+                                        <span style={{ fontSize: "0.9rem" }}>📹</span>
+                                    </div>
+                                </div>
+                            ))}
+
+                            {remoteParticipants.length === 0 && (
+                                <div style={{
+                                    padding: "2rem 1.25rem",
+                                    textAlign: "center",
+                                    color: "#64748b",
+                                    fontSize: "0.875rem",
+                                }}>
+                                    Waiting for others to join...
+                                </div>
+                            )}
                         </div>
                     </div>
-
-                    {/* Remote camera pips — slide in when sharing starts */}
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "0.75rem",
-                            overflow: "hidden",
-                            maxHeight: anyoneSharing ? "800px" : "0px",
-                            opacity: anyoneSharing ? 1 : 0,
-                            transition: "max-height 350ms ease, opacity 300ms ease",
-                        }}
-                    >
-                        {sidebarRemotes.map((participant) => (
-                            <div key={participant.id} style={{ width: "100%", aspectRatio: "16 / 9", flexShrink: 0 }}>
-                                <ParticipantVideo
-                                    stream={participant.cameraStream || participant.displayStream}
-                                    label={participant.name}
-                                    muted
-                                />
-                            </div>
-                        ))}
-                    </div>
-
-                    {/* Controls */}
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "auto" }}>
-                        <button
-                            className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"}
-                            onClick={toggleScreenShare}
-                            disabled={lobby}
-                            style={{ width: "100%" }}
-                        >
-                            {isScreenSharing ? "⏹ Stop Sharing" : "🖥 Share Screen"}
-                        </button>
-                        <button
-                            className="btn btn-secondary"
-                            onClick={toggleFullscreen}
-                            disabled={lobby}
-                            style={{ width: "100%" }}
-                        >
-                            {isFullscreen ? "⤓ Exit Fullscreen" : "⤢ Fullscreen"}
-                        </button>
-                    </div>
-                </div>
+                )}
             </div>
 
-            {/* Hidden audio players — one per remote participant */}
+            {/* Hidden audio players */}
             {remoteParticipants.map((participant) => (
                 <ParticipantAudio
                     key={participant.id}
                     stream={participant.displayStream}
-                    boost={1.7}
+                    boost={1.0}
                 />
             ))}
         </div>

@@ -7,36 +7,61 @@ export const Landing = () => {
     const [localVideoTrack, setlocalVideoTrack] = useState<MediaStreamTrack | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [joined, setJoined] = useState(false);
+    const [micEnabled, setMicEnabled] = useState(true);
+    const [camEnabled, setCamEnabled] = useState(true);
+    const [mediaError, setMediaError] = useState<string | null>(null);
 
     const getCam = async () => {
         try {
+            setMediaError(null);
             const stream = await window.navigator.mediaDevices.getUserMedia({
-                video: true,
-                audio: {
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false,
-                }
+                video: camEnabled,
+                audio: micEnabled ? {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                } : false,
             })
             const audioTrack = stream.getAudioTracks()[0]
             const videoTrack = stream.getVideoTracks()[0]
-            setLocalAudioTrack(audioTrack);
-            setlocalVideoTrack(videoTrack);
-            if (!videoRef.current) {
-                return;
+            setLocalAudioTrack(audioTrack ?? null);
+            setlocalVideoTrack(videoTrack ?? null);
+            if (videoRef.current && videoTrack) {
+                videoRef.current.srcObject = new MediaStream([videoTrack])
+                videoRef.current.play();
             }
-            videoRef.current.srcObject = new MediaStream([videoTrack])
-            videoRef.current.play();
         } catch (e) {
             console.error("Error accessing media devices:", e);
+            setMediaError("Could not access camera/microphone. Please check permissions.");
         }
     }
 
     useEffect(() => {
-        if (videoRef && videoRef.current) {
-            getCam()
+        getCam();
+    }, []);
+
+    const toggleMic = async () => {
+        if (micEnabled) {
+            localAudioTrack?.stop();
+            setLocalAudioTrack(null);
+            setMicEnabled(false);
+        } else {
+            await getCam();
+            setMicEnabled(true);
         }
-    }, [videoRef]);
+    };
+
+    const toggleCam = async () => {
+        if (camEnabled) {
+            localVideoTrack?.stop();
+            setlocalVideoTrack(null);
+            if (videoRef.current) videoRef.current.srcObject = null;
+            setCamEnabled(false);
+        } else {
+            await getCam();
+            setCamEnabled(true);
+        }
+    };
 
     const [roomId, setRoomId] = useState("");
 
@@ -45,71 +70,230 @@ export const Landing = () => {
             <div style={{
                 minHeight: "100vh",
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: "20px"
+                flexDirection: "column",
             }}>
-                <div className="card" style={{ width: "100%", maxWidth: "500px", textAlign: "center" }}>
-                    <h1 style={{ marginBottom: "1.5rem", fontSize: "1.75rem", fontWeight: "700" }}>
-                        Join the Party
-                    </h1>
-
-                    <div className="video-container" style={{ aspectRatio: "16/9", marginBottom: "2rem" }}>
-                        <video
-                            autoPlay
-                            muted
-                            playsInline
-                            ref={videoRef}
-                            style={{ transform: "scaleX(-1)" }}
-                        />
+                {/* Header */}
+                <header style={{
+                    padding: "1rem 2rem",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    borderBottom: "1px solid var(--border)",
+                    background: "var(--bg-card)",
+                }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                        <div style={{
+                            width: "40px",
+                            height: "40px",
+                            borderRadius: "12px",
+                            background: "linear-gradient(135deg, var(--primary), #7c3aed)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: "white",
+                            fontSize: "1.25rem",
+                        }}>
+                            ▶
+                        </div>
+                        <span style={{ fontWeight: 700, fontSize: "1.25rem" }}>WatchParty</span>
                     </div>
+                </header>
 
-                    <div style={{ display: "flex", flexDirection: "column", gap: "15px" }}>
-                        <input
-                            className="input"
-                            type="text"
-                            placeholder="Enter your name..."
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                        />
+                {/* Main content */}
+                <div style={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "2rem",
+                    background: "var(--bg-main)",
+                }}>
+                    <div className="landing-grid" style={{
+                        width: "100%",
+                        maxWidth: "900px",
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: "3rem",
+                        alignItems: "center",
+                    }}>
+                        {/* Left: Video preview */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                            <div className="card" style={{ padding: 0, overflow: "hidden", aspectRatio: "16/9" }}>
+                                <video
+                                    autoPlay
+                                    muted
+                                    playsInline
+                                    ref={videoRef}
+                                    style={{
+                                        width: "100%",
+                                        height: "100%",
+                                        objectFit: "cover",
+                                        transform: "scaleX(-1)",
+                                        background: "#000",
+                                        display: "block",
+                                    }}
+                                />
+                                {!camEnabled && (
+                                    <div style={{
+                                        position: "absolute",
+                                        inset: 0,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        background: "#1e293b",
+                                        color: "var(--text-muted)",
+                                        fontSize: "3rem",
+                                    }}>
+                                        📷
+                                    </div>
+                                )}
+                            </div>
 
-                        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                            <div style={{ flex: 1 }}>
+                            {/* Device toggles */}
+                            <div style={{ display: "flex", gap: "0.75rem", justifyContent: "center" }}>
+                                <button
+                                    onClick={toggleMic}
+                                    style={{
+                                        width: "48px",
+                                        height: "48px",
+                                        borderRadius: "50%",
+                                        border: "none",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        fontSize: "1.25rem",
+                                        background: micEnabled ? "white" : "var(--danger)",
+                                        color: micEnabled ? "var(--text-main)" : "white",
+                                        boxShadow: "var(--shadow-md)",
+                                        transition: "all 0.2s",
+                                    }}
+                                    title={micEnabled ? "Mute microphone" : "Unmute microphone"}
+                                >
+                                    {micEnabled ? "🎤" : "🔇"}
+                                </button>
+                                <button
+                                    onClick={toggleCam}
+                                    style={{
+                                        width: "48px",
+                                        height: "48px",
+                                        borderRadius: "50%",
+                                        border: "none",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        fontSize: "1.25rem",
+                                        background: camEnabled ? "white" : "var(--danger)",
+                                        color: camEnabled ? "var(--text-main)" : "white",
+                                        boxShadow: "var(--shadow-md)",
+                                        transition: "all 0.2s",
+                                    }}
+                                    title={camEnabled ? "Turn off camera" : "Turn on camera"}
+                                >
+                                    {camEnabled ? "📹" : "📷"}
+                                </button>
+                            </div>
+
+                            {mediaError && (
+                                <p style={{
+                                    color: "var(--danger)",
+                                    fontSize: "0.85rem",
+                                    textAlign: "center",
+                                    background: "#fef2f2",
+                                    padding: "0.5rem 1rem",
+                                    borderRadius: "0.5rem",
+                                }}>
+                                    {mediaError}
+                                </p>
+                            )}
+                        </div>
+
+                        {/* Right: Join form */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+                            <div>
+                                <h1 style={{ fontSize: "2rem", fontWeight: 800, lineHeight: 1.2 }}>
+                                    Watch & connect
+                                    <br />
+                                    <span style={{
+                                        background: "linear-gradient(135deg, var(--primary), #7c3aed)",
+                                        WebkitBackgroundClip: "text",
+                                        WebkitTextFillColor: "transparent",
+                                    }}>
+                                        together
+                                    </span>
+                                </h1>
+                                <p style={{ color: "var(--text-muted)", marginTop: "0.75rem", fontSize: "1.05rem" }}>
+                                    Share screens, watch videos, and hang out with friends in real-time.
+                                </p>
+                            </div>
+
+                            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                                 <input
                                     className="input"
                                     type="text"
-                                    placeholder="Room ID (to join)"
-                                    value={roomId}
-                                    onChange={(e) => setRoomId(e.target.value)}
+                                    placeholder="Your name"
+                                    value={name}
+                                    onChange={(e) => setName(e.target.value)}
+                                    style={{ fontSize: "1rem", padding: "0.875rem 1rem" }}
                                 />
+
+                                <div style={{ display: "flex", gap: "0.75rem" }}>
+                                    <input
+                                        className="input"
+                                        type="text"
+                                        placeholder="Room ID to join"
+                                        value={roomId}
+                                        onChange={(e) => setRoomId(e.target.value)}
+                                        style={{ fontSize: "1rem", padding: "0.875rem 1rem" }}
+                                    />
+                                    <button
+                                        className="btn btn-primary"
+                                        disabled={!name || !roomId}
+                                        onClick={() => setJoined(true)}
+                                        style={{ minWidth: "110px", padding: "0.875rem 1.5rem" }}
+                                    >
+                                        Join
+                                    </button>
+                                </div>
+
+                                <div style={{ position: "relative", margin: "0.5rem 0" }}>
+                                    <div style={{
+                                        position: "absolute",
+                                        left: 0,
+                                        right: 0,
+                                        top: "50%",
+                                        height: "1px",
+                                        background: "var(--border)",
+                                    }} />
+                                    <span style={{
+                                        position: "relative",
+                                        background: "var(--bg-main)",
+                                        padding: "0 12px",
+                                        color: "var(--text-muted)",
+                                        fontSize: "0.875rem",
+                                    }}>
+                                        or
+                                    </span>
+                                </div>
+
+                                <button
+                                    className="btn btn-secondary"
+                                    disabled={!name}
+                                    onClick={() => {
+                                        setRoomId("");
+                                        setJoined(true);
+                                    }}
+                                    style={{
+                                        width: "100%",
+                                        padding: "0.875rem 1.5rem",
+                                        fontSize: "1rem",
+                                    }}
+                                >
+                                    Create New Room
+                                </button>
                             </div>
-                            <button
-                                className="btn btn-primary"
-                                disabled={!name || !roomId}
-                                onClick={() => setJoined(true)}
-                                style={{ minWidth: "100px" }}
-                            >
-                                Join
-                            </button>
                         </div>
-
-                        <div style={{ position: "relative", margin: "10px 0" }}>
-                            <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: "1px", background: "#e2e8f0" }} />
-                            <span style={{ position: "relative", background: "white", padding: "0 10px", color: "#64748b", fontSize: "0.875rem" }}>
-                                or
-                            </span>
-                        </div>
-
-                        <button
-                            className="btn btn-secondary"
-                            disabled={!name}
-                            onClick={() => {
-                                setRoomId(""); // Clear room ID to signal creation
-                                setJoined(true);
-                            }}
-                        >
-                            Create New Room
-                        </button>
                     </div>
                 </div>
             </div>
