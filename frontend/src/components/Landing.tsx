@@ -20,7 +20,8 @@ export const Landing = () => {
                 video: true,
                 audio: {
                     echoCancellation: true,
-                    noiseSuppression: true,
+                    // Heavy browser DSP here often sounds metallic/robotic on many devices.
+                    noiseSuppression: false,
                     autoGainControl: true,
                 },
             });

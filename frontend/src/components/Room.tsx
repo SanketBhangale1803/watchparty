@@ -182,25 +182,27 @@ const ParticipantAudio = ({
     stream: MediaStream | null;
     boost?: number;
 }) => {
-    useEffect(() => {
-        if (!stream) return;
+    const audioRef = useRef<HTMLAudioElement | null>(null);
 
-        const audioContext = new AudioContext();
-        const source = audioContext.createMediaStreamSource(stream);
-        const gainNode = audioContext.createGain();
-        gainNode.gain.value = boost;
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        audioContext.resume().catch(() => undefined);
+    useEffect(() => {
+        const el = audioRef.current;
+        if (!el) return;
+
+        if (!stream) {
+            el.srcObject = null;
+            return;
+        }
+
+        el.srcObject = stream;
+        el.volume = Math.min(1, Math.max(0, boost));
+        el.play().catch(() => undefined);
 
         return () => {
-            source.disconnect();
-            gainNode.disconnect();
-            audioContext.close().catch(() => undefined);
+            el.srcObject = null;
         };
     }, [stream, boost]);
 
-    return null;
+    return <audio ref={audioRef} playsInline hidden aria-hidden />;
 };
 
 export const Room = ({
@@ -555,11 +557,12 @@ export const Room = ({
 
     const startScreenShare = useCallback(async () => {
         try {
+            // Tab/system audio: avoid voice-oriented DSP and forced sample rates (reduces artifacts
+            // when mixed with the mic and when encoded for WebRTC).
             const audioConstraints = {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 44100,
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
             } as const;
 
             let stream: MediaStream;
@@ -1106,7 +1109,7 @@ export const Room = ({
                                         stream={tile.displayStream}
                                         label={tile.name}
                                         mirrored={tile.isLocal}
-                                        muted={tile.isLocal}
+                                        muted
                                         isLocal={tile.isLocal}
                                     />
                                 );
