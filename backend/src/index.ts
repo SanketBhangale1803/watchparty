@@ -28,7 +28,15 @@ const io = new Server(server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"]
-    }
+    },
+    // Tolerate brief network blips and platform pauses (e.g. mobile background,
+    // cloud load balancers) before tearing the socket — and the room — down.
+    pingInterval: 25_000,
+    pingTimeout: 60_000,
+    connectionStateRecovery: {
+        maxDisconnectionDuration: 2 * 60_000,
+        skipMiddlewares: true,
+    },
 });
 
 const userManager = new UserManager();

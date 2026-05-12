@@ -58,6 +58,41 @@ async function applyScreenShareSenderEncoding(sender: RTCRtpSender): Promise<voi
     }
 }
 
+/**
+ * Audio quality on WebRTC degrades to a robotic / underwater sound when the
+ * audio packets compete with video for bandwidth or get dropped. Prioritize
+ * the audio sender so the browser keeps it on the fast path.
+ */
+async function tuneAudioSender(sender: RTCRtpSender): Promise<void> {
+    try {
+        const params = sender.getParameters();
+        const encodings: RTCRtpEncodingParameters[] =
+            params.encodings?.length > 0
+                ? params.encodings.map((e) => ({ ...e }))
+                : [{ active: true }];
+
+        for (const enc of encodings) {
+            (enc as RTCRtpEncodingParameters & {
+                networkPriority?: string;
+                priority?: string;
+            }).networkPriority = "high";
+            (enc as RTCRtpEncodingParameters & {
+                networkPriority?: string;
+                priority?: string;
+            }).priority = "high";
+            // 32 kbps is plenty for stereo Opus voice; cap to avoid runaway bursts.
+            if (enc.maxBitrate == null || enc.maxBitrate > 64_000) {
+                enc.maxBitrate = 64_000;
+            }
+        }
+
+        params.encodings = encodings;
+        await sender.setParameters(params);
+    } catch {
+        /* parameters may not yet be settable; safe to ignore */
+    }
+}
+
 /** Apply encoder prefs once DTLS/SRTP transport is up (and retry after signaling settles). */
 function scheduleScreenShareSenderTuning(sender: RTCRtpSender): void {
     const tune = () => void applyScreenShareSenderEncoding(sender);
@@ -227,6 +262,16 @@ export const Room = ({
     const [showParticipants, setShowParticipants] = useState(false);
     const [micEnabled, setMicEnabled] = useState(true);
     const [camEnabled, setCamEnabled] = useState(true);
+    const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "reconnecting">("connecting");
+    const [toast, setToast] = useState<{ message: string; tone: "info" | "error" } | null>(null);
+    const [copyConfirmed, setCopyConfirmed] = useState(false);
+    const toastTimerRef = useRef<number | null>(null);
+
+    const showToast = useCallback((message: string, tone: "info" | "error" = "info") => {
+        if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+        setToast({ message, tone });
+        toastTimerRef.current = window.setTimeout(() => setToast(null), 3500);
+    }, []);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const localScreenPreviewRef = useRef<HTMLVideoElement>(null);
@@ -445,6 +490,7 @@ export const Room = ({
                 } else if (audioTrack) {
                     const sender = pc.addTrack(audioTrack, localStreamRef.current);
                     audioSendersRef.current.set(peerId, sender);
+                    void tuneAudioSender(sender);
                     createAndSendOffer(peerId);
                 }
             });
@@ -464,9 +510,16 @@ export const Room = ({
 
             const socket = socketRef.current;
             const pc = new RTCPeerConnection({
-                iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+                iceServers: [
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:19302" },
+                    { urls: "stun:stun2.l.google.com:19302" },
+                    { urls: "stun:stun3.l.google.com:19302" },
+                    { urls: "stun:stun.cloudflare.com:3478" },
+                ],
                 bundlePolicy: "max-bundle",
                 rtcpMuxPolicy: "require",
+                iceCandidatePoolSize: 4,
             });
             peersRef.current.set(peerId, pc);
 
@@ -480,6 +533,7 @@ export const Room = ({
             if (initialAudioTrack) {
                 const audioSender = pc.addTrack(initialAudioTrack, localStreamRef.current);
                 audioSendersRef.current.set(peerId, audioSender);
+                void tuneAudioSender(audioSender);
             }
 
             if (screenStreamRef.current && screenVideoTrackRef.current) {
@@ -503,6 +557,16 @@ export const Room = ({
 
                 if (!currentStream.getTracks().some((t) => t.id === event.track.id)) {
                     currentStream.addTrack(event.track);
+                }
+
+                // Keep remote audio latency low so voice doesn't sound delayed/laggy.
+                if (event.track.kind === "audio") {
+                    const r = event.receiver as RTCRtpReceiver & { playoutDelayHint?: number };
+                    try {
+                        r.playoutDelayHint = 0;
+                    } catch {
+                        /* not supported in this browser */
+                    }
                 }
 
                 event.track.onended = () => {
@@ -649,6 +713,7 @@ export const Room = ({
                 else {
                     const sender = pc.addTrack(nextAudioTrack, localStreamRef.current);
                     audioSendersRef.current.set(peerId, sender);
+                    void tuneAudioSender(sender);
                 }
             } else if (micSender) {
                 micSender.replaceTrack(null).catch(() => undefined);
@@ -669,21 +734,57 @@ export const Room = ({
         const socket = io(URL, {
             path: "/socket.io",
             transports: ["websocket", "polling"],
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 800,
+            reconnectionDelayMax: 5000,
+            timeout: 15_000,
         });
         socketRef.current = socket;
 
+        const tearDownPeers = () => {
+            peersRef.current.forEach((pc) => pc.close());
+            peersRef.current.clear();
+            remoteStreamsRef.current.clear();
+            participantStateRef.current.clear();
+            screenStatusRef.current.clear();
+            screenVideoSendersRef.current.clear();
+            cameraSendersRef.current.clear();
+            audioSendersRef.current.clear();
+            makingOfferRef.current.clear();
+            peerNamesRef.current.clear();
+            syncParticipants();
+        };
+
         socket.on("connect", () => {
+            const isReconnect = socketIdRef.current !== null;
             socketIdRef.current = socket.id ?? null;
-            const joinId = demoRoomIdRef.current?.trim();
-            if (joinId) socket.emit("join-room", { roomId: joinId, name: nameRef.current });
-            else socket.emit("create-room", { name: nameRef.current });
+            setConnectionStatus("connected");
+
+            // On a reconnect, peers will have new socket ids — drop everything and
+            // re-bootstrap from the server-side participant list.
+            if (isReconnect) {
+                tearDownPeers();
+            }
+
+            const knownRoomId = currentRoomIdRef.current?.trim();
+            const requestedJoinId = demoRoomIdRef.current?.trim();
+            const joinId = knownRoomId || requestedJoinId;
+            if (joinId) {
+                socket.emit("join-room", { roomId: joinId, name: nameRef.current });
+            } else {
+                socket.emit("create-room", { name: nameRef.current });
+            }
+
+            if (isReconnect) showToast("Reconnected", "info");
         });
 
-        socket.on("disconnect", () => {
-            // Our socket disconnected - this might be due to network issues
-            // Try to reconnect
-            console.log("Socket disconnected, attempting to reconnect...");
+        socket.on("disconnect", (reason) => {
+            console.log("Socket disconnected:", reason);
+            setConnectionStatus("reconnecting");
         });
+
+        socket.io.on("reconnect_attempt", () => setConnectionStatus("reconnecting"));
 
         socket.on("room-created", ({ roomId }: { roomId: string }) => {
             setCurrentRoomId(roomId);
@@ -821,8 +922,7 @@ export const Room = ({
         });
 
         socket.on("room-join-error", ({ message }: { message: string }) => {
-            alert(message);
-            window.location.reload();
+            showToast(message || "Could not join room", "error");
         });
 
         return () => {
@@ -900,7 +1000,13 @@ export const Room = ({
 
     const handleCopyRoomId = useCallback(() => {
         if (!displayedRoomId) return;
-        navigator.clipboard.writeText(displayedRoomId).catch(() => undefined);
+        navigator.clipboard
+            .writeText(displayedRoomId)
+            .then(() => {
+                setCopyConfirmed(true);
+                window.setTimeout(() => setCopyConfirmed(false), 1500);
+            })
+            .catch(() => undefined);
     }, [displayedRoomId]);
 
     const handleLeave = useCallback(() => {
@@ -922,68 +1028,112 @@ export const Room = ({
     return (
         <div
             ref={containerRef}
+            className={isFullscreen ? "" : "app-backdrop"}
             style={{
                 width: "100%",
                 maxWidth: "100vw",
                 height: "100vh",
                 overflow: "hidden",
                 boxSizing: "border-box",
-                backgroundColor: isFullscreen ? "#000" : "#0f172a",
+                backgroundColor: isFullscreen ? "#000" : undefined,
                 display: "flex",
                 flexDirection: "column",
             }}
         >
             {/* Header */}
-            <div style={{
-                padding: "0.75rem 1.25rem",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                background: "rgba(15, 23, 42, 0.9)",
-                backdropFilter: "blur(8px)",
-                borderBottom: "1px solid rgba(255,255,255,0.08)",
-                flexShrink: 0,
-                zIndex: 10,
-            }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                    <div style={{
-                        width: "32px",
-                        height: "32px",
-                        borderRadius: "8px",
-                        background: "linear-gradient(135deg, var(--primary), #7c3aed)",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: "white",
-                        fontSize: "0.9rem",
-                    }}>
-                        ▶
+            <div
+                style={{
+                    padding: "0.85rem 1.4rem",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "1rem",
+                    background: "rgba(11, 15, 26, 0.78)",
+                    backdropFilter: "blur(14px)",
+                    WebkitBackdropFilter: "blur(14px)",
+                    borderBottom: "1px solid var(--border)",
+                    flexShrink: 0,
+                    zIndex: 10,
+                }}
+            >
+                <div style={{ display: "flex", alignItems: "center", gap: "0.85rem", minWidth: 0 }}>
+                    <div
+                        style={{
+                            width: 36,
+                            height: 36,
+                            borderRadius: 10,
+                            background: "linear-gradient(135deg, var(--primary), var(--accent))",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: "white",
+                            fontWeight: 800,
+                            fontSize: "0.95rem",
+                            flexShrink: 0,
+                            boxShadow: "0 10px 30px -10px var(--primary-glow)",
+                        }}
+                        aria-hidden
+                    >
+                        C
                     </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem", minWidth: 0 }}>
-                        <h2 style={{ fontSize: "0.95rem", fontWeight: 700, color: "white", margin: 0 }}>
-                            Closr
-                        </h2>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                            <span style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-main)" }}>
+                                Closr
+                            </span>
+                            <span
+                                className="status-pill"
+                                title={
+                                    connectionStatus === "connected"
+                                        ? "Connected to signaling"
+                                        : connectionStatus === "reconnecting"
+                                            ? "Reconnecting…"
+                                            : "Connecting…"
+                                }
+                            >
+                                <span
+                                    className={`status-dot ${
+                                        connectionStatus === "reconnecting"
+                                            ? "is-reconnecting"
+                                            : connectionStatus === "connecting"
+                                                ? "is-connecting"
+                                                : ""
+                                    }`}
+                                />
+                                {connectionStatus === "connected"
+                                    ? "Live"
+                                    : connectionStatus === "reconnecting"
+                                        ? "Reconnecting"
+                                        : "Connecting"}
+                            </span>
+                        </div>
                         {displayedRoomId && (
                             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.5rem" }}>
-                                <span style={{ fontSize: "0.7rem", color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                                    Room ID
+                                <span
+                                    style={{
+                                        fontSize: "0.68rem",
+                                        color: "var(--text-muted)",
+                                        textTransform: "uppercase",
+                                        letterSpacing: "0.08em",
+                                    }}
+                                >
+                                    Room
                                 </span>
                                 <code
                                     style={{
-                                        fontSize: "1rem",
+                                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                                        fontSize: "0.9rem",
                                         fontWeight: 600,
-                                        color: "#f8fafc",
-                                        letterSpacing: "0.06em",
-                                        background: "rgba(255,255,255,0.08)",
-                                        border: "1px solid rgba(255,255,255,0.14)",
-                                        borderRadius: "6px",
+                                        color: "var(--text-main)",
+                                        letterSpacing: "0.12em",
+                                        background: "rgba(255,255,255,0.05)",
+                                        border: "1px solid var(--border-strong)",
+                                        borderRadius: 6,
                                         padding: "2px 8px",
                                         maxWidth: "min(260px, 45vw)",
                                         overflow: "hidden",
                                         textOverflow: "ellipsis",
                                         whiteSpace: "nowrap",
-                                        display: "inline-block",
-                                        verticalAlign: "middle",
                                     }}
                                     title={displayedRoomId}
                                 >
@@ -994,39 +1144,41 @@ export const Room = ({
                                     onClick={handleCopyRoomId}
                                     style={{
                                         fontSize: "0.72rem",
-                                        padding: "0.25rem 0.55rem",
-                                        borderRadius: "6px",
-                                        border: "1px solid rgba(255,255,255,0.2)",
-                                        background: "rgba(255,255,255,0.1)",
-                                        color: "#e2e8f0",
+                                        padding: "0.25rem 0.6rem",
+                                        borderRadius: 6,
+                                        border: "1px solid var(--border-strong)",
+                                        background: copyConfirmed ? "rgba(34, 197, 94, 0.18)" : "rgba(255,255,255,0.05)",
+                                        color: copyConfirmed ? "#bbf7d0" : "var(--text-main)",
                                         cursor: "pointer",
                                         fontWeight: 600,
+                                        transition: "all 0.15s ease",
                                     }}
                                 >
-                                    Copy
+                                    {copyConfirmed ? "Copied" : "Copy"}
                                 </button>
                             </div>
                         )}
                     </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                    <span style={{ fontSize: "0.85rem", color: "#94a3b8" }}>
-                        {totalParticipants} {totalParticipants === 1 ? "participant" : "participants"}
+
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <span style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
+                        {totalParticipants} {totalParticipants === 1 ? "person" : "people"}
                     </span>
                     <button
                         onClick={() => setShowParticipants(!showParticipants)}
                         style={{
-                            background: showParticipants ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.08)",
-                            border: "1px solid rgba(255,255,255,0.12)",
-                            borderRadius: "8px",
-                            padding: "0.5rem 0.75rem",
-                            color: "white",
+                            background: showParticipants ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)",
+                            border: "1px solid var(--border-strong)",
+                            borderRadius: 10,
+                            padding: "0.45rem 0.8rem",
+                            color: "var(--text-main)",
                             cursor: "pointer",
-                            fontSize: "0.85rem",
+                            fontSize: "0.82rem",
                             display: "flex",
                             alignItems: "center",
-                            gap: "0.5rem",
-                            transition: "all 0.2s",
+                            gap: "0.4rem",
+                            transition: "all 0.18s ease",
                         }}
                     >
                         👥 Participants
@@ -1183,117 +1335,83 @@ export const Room = ({
                 )}
             </div>
 
-            {/* Control bar - outside main content */}
-            <div style={{
-                display: "flex",
-                justifyContent: "center",
-                alignItems: "center",
-                gap: "1rem",
-                padding: "0.75rem 1.5rem",
-                background: "rgba(15, 23, 42, 0.95)",
-                borderTop: "1px solid rgba(255,255,255,0.08)",
-                flexShrink: 0,
-            }}>
+            {/* Control bar */}
+            <div
+                style={{
+                    display: "flex",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    gap: "0.65rem",
+                    padding: "0.85rem 1.5rem 1rem",
+                    background: "rgba(11, 15, 26, 0.85)",
+                    backdropFilter: "blur(14px)",
+                    WebkitBackdropFilter: "blur(14px)",
+                    borderTop: "1px solid var(--border)",
+                    flexShrink: 0,
+                }}
+            >
                 <button
+                    type="button"
                     onClick={handleToggleMic}
-                    style={{
-                        padding: "0.5rem 1rem",
-                        borderRadius: "0.5rem",
-                        border: "none",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.875rem",
-                        fontWeight: 500,
-                        background: micEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
-                        color: "white",
-                        transition: "all 0.2s",
-                    }}
+                    className={`ctrl-btn ${micEnabled ? "is-on" : "is-off"}`}
+                    aria-label={micEnabled ? "Mute microphone" : "Unmute microphone"}
+                    title={micEnabled ? "Mute microphone" : "Unmute microphone"}
                 >
-                    <span>{micEnabled ? "Mic On" : "Mic Off"}</span>
+                    {micEnabled ? "🎙️" : "🔇"}
                 </button>
 
                 <button
+                    type="button"
                     onClick={handleToggleCam}
-                    style={{
-                        padding: "0.5rem 1rem",
-                        borderRadius: "0.5rem",
-                        border: "none",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.875rem",
-                        fontWeight: 500,
-                        background: camEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
-                        color: "white",
-                        transition: "all 0.2s",
-                    }}
+                    className={`ctrl-btn ${camEnabled ? "is-on" : "is-off"}`}
+                    aria-label={camEnabled ? "Turn camera off" : "Turn camera on"}
+                    title={camEnabled ? "Turn camera off" : "Turn camera on"}
                 >
-                    <span>{camEnabled ? "Camera On" : "Camera Off"}</span>
+                    {camEnabled ? "📹" : "🚫"}
                 </button>
 
                 <button
+                    type="button"
                     onClick={toggleScreenShare}
-                    style={{
-                        padding: "0.5rem 1rem",
-                        borderRadius: "0.5rem",
-                        border: "none",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.875rem",
-                        fontWeight: 500,
-                        background: isScreenSharing ? "var(--success)" : "rgba(255,255,255,0.12)",
-                        color: "white",
-                        transition: "all 0.2s",
-                    }}
+                    className={`ctrl-btn ${isScreenSharing ? "is-on" : ""}`}
+                    aria-label={isScreenSharing ? "Stop sharing your screen" : "Share your screen"}
+                    title={isScreenSharing ? "Stop sharing" : "Share your screen"}
                 >
-                    <span>{isScreenSharing ? "Stop Share" : "Share Screen"}</span>
+                    🖥️
                 </button>
 
                 <button
+                    type="button"
                     onClick={toggleFullscreen}
-                    style={{
-                        padding: "0.5rem 1rem",
-                        borderRadius: "0.5rem",
-                        border: "none",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.875rem",
-                        fontWeight: 500,
-                        background: "rgba(255,255,255,0.12)",
-                        color: "white",
-                        transition: "all 0.2s",
-                    }}
+                    className="ctrl-btn"
+                    aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                    title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
                 >
-                    <span>{isFullscreen ? "Exit Fullscreen" : "Fullscreen"}</span>
+                    {isFullscreen ? "⤡" : "⤢"}
                 </button>
 
+                <div style={{ width: 1, height: 26, background: "var(--border-strong)", margin: "0 0.25rem" }} />
+
                 <button
+                    type="button"
                     onClick={handleLeave}
-                    style={{
-                        padding: "0.5rem 1rem",
-                        borderRadius: "0.5rem",
-                        border: "none",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "0.5rem",
-                        fontSize: "0.875rem",
-                        fontWeight: 500,
-                        background: "var(--danger)",
-                        color: "white",
-                        transition: "all 0.2s",
-                    }}
+                    className="ctrl-btn is-danger"
+                    aria-label="Leave call"
+                    title="Leave call"
                 >
-                    <span>Leave</span>
+                    Leave
                 </button>
             </div>
+
+            {toast && (
+                <div
+                    className={`toast ${toast.tone === "error" ? "is-error" : ""}`}
+                    role="status"
+                    aria-live="polite"
+                >
+                    {toast.message}
+                </div>
+            )}
 
             {/* Hidden audio players */}
             {remoteParticipants.map((participant) => (
