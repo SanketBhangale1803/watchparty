@@ -51,6 +51,15 @@ export class RoomManager {
         return roomId.trim().toUpperCase();
     }
 
+    getUserRoom(socketId: string): string | undefined {
+        return this.userRoomMap.get(socketId);
+    }
+
+    getRoomSize(roomId: string): number {
+        const room = this.rooms.get(this.normalizeRoomId(roomId));
+        return room ? room.participants.size : 0;
+    }
+
     private touch(room: Room) {
         room.lastActivityAt = Date.now();
     }

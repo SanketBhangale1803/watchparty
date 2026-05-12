@@ -37,11 +37,21 @@ const io = new Server(server, {
 
 const userManager = new UserManager();
 
+const stamp = () => new Date().toISOString();
+
 io.on('connection', (socket: Socket) => {
-    console.log('a user connected:', socket.id);
-    userManager.addUser("randomName", socket);
-    socket.on("disconnect", () => {
-        console.log("user disconnected:", socket.id);
+    console.log(`[${stamp()}] [connect]    socket=${socket.id}`);
+    userManager.addUser("Guest", socket);
+
+    socket.on("disconnect", (reason) => {
+        // Resolve the human-readable name BEFORE we ask the manager to forget the user.
+        const name = userManager.getUserName(socket.id) ?? "Guest";
+        const roomId = userManager.getUserRoom(socket.id);
+        console.log(
+            `[${stamp()}] [disconnect] socket=${socket.id} user="${name}"` +
+            (roomId ? ` room=${roomId}` : "") +
+            ` reason=${reason}`
+        );
         userManager.removeUser(socket.id);
     });
 });

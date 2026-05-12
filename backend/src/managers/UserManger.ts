@@ -6,6 +6,8 @@ export interface User {
     name: string;
 }
 
+const stamp = () => new Date().toISOString();
+
 export class UserManager {
     private users: Map<string, User>;
     private roomManager: RoomManager;
@@ -25,12 +27,23 @@ export class UserManager {
         this.roomManager.removeUser(socketId);
     }
 
+    getUserName(socketId: string): string | undefined {
+        return this.users.get(socketId)?.name;
+    }
+
+    getUserRoom(socketId: string): string | undefined {
+        return this.roomManager.getUserRoom(socketId);
+    }
+
     private initHandlers(socket: Socket) {
         socket.on("create-room", ({ name }: { name?: string }) => {
             const user = this.users.get(socket.id);
             if (!user) return;
             if (name) user.name = name;
             const roomId = this.roomManager.createRoom(user);
+            console.log(
+                `[${stamp()}] [create]     socket=${socket.id} user="${user.name}" room=${roomId} size=1`
+            );
             socket.emit("room-created", { roomId });
             socket.emit("room-joined", { roomId, participants: [] });
         });
@@ -42,13 +55,23 @@ export class UserManager {
 
             const result = this.roomManager.joinRoom(roomId, user);
             if (!result.ok) {
+                console.log(
+                    `[${stamp()}] [join-fail] socket=${socket.id} user="${user.name}" room=${roomId} reason=${result.reason}`
+                );
                 socket.emit("room-join-error", {
                     message:
                         result.reason === "full"
                             ? "This room has reached its participant limit."
                             : "Could not join room.",
                 });
+                return;
             }
+
+            const size = this.roomManager.getRoomSize(result.roomId);
+            console.log(
+                `[${stamp()}] [join]       socket=${socket.id} user="${user.name}" room=${result.roomId} size=${size}` +
+                (result.created ? " (auto-created)" : "")
+            );
         });
 
         socket.on("offer", ({ sdp, roomId, targetId }: { sdp: any; roomId: string; targetId: string }) => {
@@ -84,6 +107,12 @@ export class UserManager {
         // Explicit leave so others' tiles disappear immediately instead of after
         // a Socket.IO ping timeout.
         socket.on("leave-room", () => {
+            const user = this.users.get(socket.id);
+            const roomId = this.roomManager.getUserRoom(socket.id);
+            console.log(
+                `[${stamp()}] [leave]      socket=${socket.id} user="${user?.name ?? "Guest"}"` +
+                (roomId ? ` room=${roomId}` : "")
+            );
             this.roomManager.removeUser(socket.id);
         });
     }
