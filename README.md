@@ -2,7 +2,35 @@
 
 This project is built on top of https://github.com/hkirat/omegle with a cleaner UI.
 
-**Closr** is a small-group **video calling** app aimed at talking with friends: join a room, see everyone in a mesh WebRTC layout, keep audio and video **peer-to-peer** when the network allows. Signaling runs over **Socket.IO**; media does not transit through the server.
+Closr is a simple group video calling app for talking with friends in the browser.
+
+Pick a name, create a room or open an invite link, and you’re in—no accounts, no install, and no ads. Video and audio go directly between participants when your network allows it, so calls stay private and low-latency for small groups.
+
+What you can do
+
+
+
+
+
+Start a room and share an invite link so others can join
+
+
+
+See everyone in a clean grid or a focused screen-share layout
+
+
+
+Share your screen (one person at a time)
+
+
+
+Mute your mic or turn off your camera from simple controls
+
+
+
+Lock the room so only people who already joined can come back (host)
+
+Closr is built for casual hangouts—study sessions, game nights, or quick catch-ups—not large webinars or enterprise meetings.
 
 ---
 
