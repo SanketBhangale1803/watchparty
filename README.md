@@ -34,6 +34,23 @@ Closr is built for casual hangouts—study sessions, game nights, or quick catch
 
 ---
 
+---
+
+## ⚖️ Legal Notice & Content Disclaimer Gating
+
+Closr functions purely as an intermediary, real-time communications tool. Because the platform uses a **peer-to-peer full-mesh architecture**, all video, audio, and screen-sharing data flows directly between users' browsers. 
+
+**Closr servers never stream, proxy, cache, or store media content.** 
+
+To insulate the platform and its developers from liability under third-party copyright claims (e.g., Netflix, YouTube, TikTok), **the frontend application enforces a mandatory legal disclaimer modal on initial site load.** 
+
+### Mandatory Compliance Rules:
+1. **No Endorsement:** Closr does not provide access to, index, or curate any third-party streaming media.
+2. **User Liability:** Users assume sole legal responsibility for any content they choose to broadcast or display via the screen-sharing feature.
+3. **P2P Transparency:** The disclaimer explicitly clarifies that the app functions identically to enterprise utilities like Zoom or Google Meet, acting purely as a conduit for user-generated data.
+
+Production deployments **must** keep this acknowledgment wall active to prevent users from interacting with the signaling plane before agreeing to the terms.
+
 ## Architecture overview
 
 ```mermaid
