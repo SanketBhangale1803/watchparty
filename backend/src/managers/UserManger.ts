@@ -141,7 +141,7 @@ export class UserManager {
                     this.joinLimiter.recordFailure(key, 60_000);
                     const messages: Record<string, string> = {
                         full: "This room is full.",
-                        locked: "This room is locked. Ask the host to unlock it or send a new invite.",
+                        locked: "This room is locked for new guests. If you were already in the call, refresh and rejoin with your invite link.",
                         invalid: JOIN_DENIED,
                         not_found: JOIN_DENIED,
                         forbidden: JOIN_DENIED,

@@ -3,7 +3,9 @@ import { Socket, io } from "socket.io-client";
 import {
     buildInviteLink,
     getClientId,
+    loadInviteToken,
     loadRoomSecret,
+    saveInviteToken,
     saveRoomSecret,
 } from "../lib/session";
 
@@ -285,6 +287,7 @@ export const Room = ({
     const [copyConfirmed, setCopyConfirmed] = useState(false);
     const [isRoomLocked, setIsRoomLocked] = useState(false);
     const [isHost, setIsHost] = useState(false);
+    const [activeScreenSharerId, setActiveScreenSharerId] = useState<string | null>(null);
     const toastTimerRef = useRef<number | null>(null);
 
     const showToast = useCallback((message: string, tone: "info" | "error" = "info") => {
@@ -653,7 +656,7 @@ export const Room = ({
                     if (!existingTimer) {
                         const t = window.setTimeout(() => {
                             if (pc.connectionState === "disconnected") dropPeer();
-                        }, 6000);
+                        }, 15_000);
                         peerDeathTimersRef.current.set(peerId, t);
                     }
                     return;
@@ -688,8 +691,14 @@ export const Room = ({
         setScreenPreviewStream(null);
         setIsScreenSharing(false);
         isScreenSharingRef.current = false;
+        setActiveScreenSharerId((prev) =>
+            prev === socketIdRef.current ? null : prev
+        );
         emitScreenShareStatus(false, null);
     }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, syncOutboundAudioTrack]);
+
+    const stopScreenShareRef = useRef(stopScreenShare);
+    stopScreenShareRef.current = stopScreenShare;
 
     const startScreenShare = useCallback(async () => {
         try {
@@ -829,14 +838,15 @@ export const Room = ({
         };
 
         const emitJoinRoom = (roomId: string) => {
-            const token =
-                inviteTokenRef.current ||
-                demoInviteTokenRef.current?.trim() ||
-                null;
             const secret =
                 roomSecretRef.current ||
                 loadRoomSecret(roomId) ||
                 demoRoomSecretRef.current?.trim() ||
+                null;
+            const token =
+                inviteTokenRef.current ||
+                loadInviteToken(roomId) ||
+                demoInviteTokenRef.current?.trim() ||
                 null;
 
             if (!token && !secret) {
@@ -912,12 +922,28 @@ export const Room = ({
 
         socket.on("invite-token-refreshed", ({ inviteToken }: { inviteToken: string }) => {
             inviteTokenRef.current = inviteToken;
+            const roomId = currentRoomIdRef.current;
+            if (roomId) saveInviteToken(roomId, inviteToken);
         });
 
         socket.on("room-locked", ({ locked }: { locked: boolean }) => {
             setIsRoomLocked(locked);
-            showToast(locked ? "Room locked — no new joins" : "Room unlocked", "info");
+            showToast(
+                locked ? "Room locked — new guests cannot join" : "Room unlocked — invite link works again",
+                "info"
+            );
         });
+
+        socket.on(
+            "screen-share-revoked",
+            ({ newSharerId }: { roomId: string; newSharerId: string }) => {
+                if (isScreenSharingRef.current) {
+                    stopScreenShareRef.current();
+                    const sharerName = peerNamesRef.current.get(newSharerId) ?? "Someone";
+                    showToast(`${sharerName} started sharing their screen`, "info");
+                }
+            }
+        );
 
         socket.on(
             "room-joined",
@@ -1021,12 +1047,35 @@ export const Room = ({
                 senderId,
                 isSharing,
                 trackId,
+                activeSharerId,
             }: {
                 roomId: string;
                 senderId: string;
                 isSharing: boolean;
                 trackId: string | null;
+                activeSharerId?: string | null;
             }) => {
+                const myId = socketIdRef.current;
+                if (activeSharerId !== undefined) {
+                    setActiveScreenSharerId(activeSharerId);
+                } else if (isSharing) {
+                    setActiveScreenSharerId(senderId);
+                } else {
+                    setActiveScreenSharerId((prev) =>
+                        prev === senderId ? null : prev
+                    );
+                }
+
+                if (
+                    isSharing &&
+                    senderId !== myId &&
+                    isScreenSharingRef.current
+                ) {
+                    stopScreenShareRef.current();
+                    const sharerName = peerNamesRef.current.get(senderId) ?? "Someone";
+                    showToast(`${sharerName} is sharing their screen`, "info");
+                }
+
                 screenStatusRef.current.set(senderId, { isSharing, trackId });
                 const participant = participantStateRef.current.get(senderId);
                 if (!participant) return;
@@ -1054,6 +1103,9 @@ export const Room = ({
             peerNamesRef.current.delete(participantId);
             makingOfferRef.current.delete(participantId);
             screenStatusRef.current.delete(participantId);
+            setActiveScreenSharerId((prev) =>
+                prev === participantId ? null : prev
+            );
             removeParticipant(participantId);
         });
 
@@ -1111,10 +1163,19 @@ export const Room = ({
     );
 
     const sharingParticipant = useMemo(() => {
+        if (activeScreenSharerId) {
+            const remote = remoteParticipants.find((p) => p.id === activeScreenSharerId);
+            if (remote) {
+                return { id: remote.id, name: remote.name, isLocal: false };
+            }
+            if (isScreenSharing) {
+                return { id: "self", name, isLocal: true };
+            }
+        }
         if (isScreenSharing) return { id: "self", name, isLocal: true };
-        const sharing = remoteParticipants.find(p => p.isSharingScreen);
+        const sharing = remoteParticipants.find((p) => p.isSharingScreen);
         return sharing ? { id: sharing.id, name: sharing.name, isLocal: false } : null;
-    }, [isScreenSharing, remoteParticipants, name]);
+    }, [activeScreenSharerId, isScreenSharing, remoteParticipants, name]);
 
     const allTiles = useMemo(() => {
         const tiles = [{ id: "self", name, displayStream: localStreamRef.current, isLocal: true }];
@@ -1401,7 +1462,8 @@ export const Room = ({
             }}>
                 {/* Center: Main display (screen share or grid) */}
                 <div style={{
-                    flex: 1,
+                    flex: sharingParticipant ? "1 1 68%" : 1,
+                    minWidth: 0,
                     display: "flex",
                     flexDirection: "column",
                     overflow: "hidden",
@@ -1478,10 +1540,11 @@ export const Room = ({
                 {/* Right panel: Only show when someone is sharing */}
                 {sharingParticipant && (
                     <div style={{
-                        width: "240px",
+                        width: "286px",
+                        flex: "0 0 286px",
                         display: "flex",
                         flexDirection: "column",
-                        gap: "0.5rem",
+                        gap: "0.55rem",
                         overflow: "hidden",
                         flexShrink: 0,
                     }}>
