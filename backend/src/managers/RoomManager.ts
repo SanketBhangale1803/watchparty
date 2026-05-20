@@ -239,6 +239,7 @@ export class RoomManager {
                 participants: [...room.participants]
                     .filter(([id]) => id !== user.socket.id)
                     .map(([, p]) => ({ id: p.socket.id, name: p.name })),
+                isHost: user.clientId === room.hostClientId,
             });
             if (user.clientId) room.clientIds.set(user.clientId, user.socket.id);
             this.touch(room);
@@ -268,6 +269,7 @@ export class RoomManager {
         user.socket.emit("room-joined", {
             roomId: normalized,
             participants: existingParticipants,
+            isHost: user.clientId === room.hostClientId,
         });
 
         room.participants.forEach((participant) => {

@@ -83,8 +83,8 @@ export class UserManager {
                 console.log(
                     `[${stamp()}] [create]     socket=${socket.id} user="${user.name}" room=${roomId} size=1`
                 );
-                socket.emit("room-created", { roomId, roomSecret, inviteToken });
-                socket.emit("room-joined", { roomId, participants: [] });
+                socket.emit("room-created", { roomId, roomSecret, inviteToken, isHost: true });
+                socket.emit("room-joined", { roomId, participants: [], isHost: true });
             }
         );
 
@@ -164,7 +164,9 @@ export class UserManager {
 
         socket.on("lock-room", ({ locked }: { locked: boolean }) => {
             if (!this.roomManager.setRoomLocked(socket.id, Boolean(locked))) {
-                socket.emit("room-join-error", { message: "Only the host can lock this room." });
+                socket.emit("room-lock-error", {
+                    message: "Only the host can lock this room. Try refreshing if you just created the room.",
+                });
             }
         });
 

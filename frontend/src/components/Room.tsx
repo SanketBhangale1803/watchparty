@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Socket, io } from "socket.io-client";
 import {
     buildInviteLink,
+    clearActiveRoomSession,
     getClientId,
+    loadActiveRoomSession,
     loadInviteToken,
     loadRoomSecret,
+    saveActiveRoomSession,
     saveInviteToken,
     saveRoomSecret,
 } from "../lib/session";
@@ -259,6 +262,7 @@ export const Room = ({
     name,
     localAudioTrack,
     localVideoTrack,
+    mode,
     demoRoomId,
     demoRoomSecret,
     demoInviteToken,
@@ -266,13 +270,19 @@ export const Room = ({
     name: string;
     localAudioTrack: MediaStreamTrack | null;
     localVideoTrack: MediaStreamTrack | null;
+    mode: "create" | "join";
     demoRoomId?: string;
     /** Legacy: raw room key (old invite links). Prefer demoInviteToken. */
     demoRoomSecret?: string;
     demoInviteToken?: string;
 }) => {
+    const restoredSession = mode === "join" ? loadActiveRoomSession() : null;
+    const restoredRoomId = restoredSession?.roomId ?? null;
+    const restoredSecret = restoredRoomId ? loadRoomSecret(restoredRoomId) : null;
+    const restoredToken = restoredRoomId ? loadInviteToken(restoredRoomId) : null;
+
     const [, setLobby] = useState(true);
-    const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
+    const [currentRoomId, setCurrentRoomId] = useState<string | null>(restoredRoomId);
     const [participants, setParticipants] = useState<ParticipantState[]>([]);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const isScreenSharingRef = useRef(false);
@@ -286,7 +296,7 @@ export const Room = ({
     const [toast, setToast] = useState<{ message: string; tone: "info" | "error" } | null>(null);
     const [copyConfirmed, setCopyConfirmed] = useState(false);
     const [isRoomLocked, setIsRoomLocked] = useState(false);
-    const [isHost, setIsHost] = useState(false);
+    const [isHost, setIsHost] = useState(restoredSession?.isHost ?? false);
     const [activeScreenSharerId, setActiveScreenSharerId] = useState<string | null>(null);
     const toastTimerRef = useRef<number | null>(null);
 
@@ -301,17 +311,24 @@ export const Room = ({
 
     const socketRef = useRef<Socket | null>(null);
     const socketIdRef = useRef<string | null>(null);
-    const currentRoomIdRef = useRef<string | null>(null);
+    const currentRoomIdRef = useRef<string | null>(restoredRoomId);
     const demoRoomIdRef = useRef(demoRoomId);
     const demoRoomSecretRef = useRef(demoRoomSecret);
     const demoInviteTokenRef = useRef(demoInviteToken);
     const nameRef = useRef(name);
     const clientIdRef = useRef(getClientId());
-    const roomSecretRef = useRef<string | null>(demoRoomSecret?.trim() || null);
-    const inviteTokenRef = useRef<string | null>(demoInviteToken?.trim() || null);
-    const isHostRef = useRef(false);
+    const roomSecretRef = useRef<string | null>(
+        demoRoomSecret?.trim() || restoredSecret || null
+    );
+    const inviteTokenRef = useRef<string | null>(
+        demoInviteToken?.trim() || restoredToken || null
+    );
+    const isHostRef = useRef(restoredSession?.isHost ?? false);
+    const modeRef = useRef(mode);
+    const createRoomSentRef = useRef(false);
 
     demoRoomIdRef.current = demoRoomId;
+    modeRef.current = mode;
     demoRoomSecretRef.current = demoRoomSecret;
     demoInviteTokenRef.current = demoInviteToken;
     nameRef.current = name;
@@ -838,14 +855,15 @@ export const Room = ({
         };
 
         const emitJoinRoom = (roomId: string) => {
+            const normalizedId = roomId.trim().toUpperCase();
             const secret =
                 roomSecretRef.current ||
-                loadRoomSecret(roomId) ||
+                loadRoomSecret(normalizedId) ||
                 demoRoomSecretRef.current?.trim() ||
                 null;
             const token =
                 inviteTokenRef.current ||
-                loadInviteToken(roomId) ||
+                loadInviteToken(normalizedId) ||
                 demoInviteTokenRef.current?.trim() ||
                 null;
 
@@ -856,16 +874,55 @@ export const Room = ({
 
             if (secret) {
                 roomSecretRef.current = secret;
-                saveRoomSecret(roomId, secret);
+                saveRoomSecret(normalizedId, secret);
             }
 
+            // Host should always send the room secret on reconnect — invite tokens expire.
+            const useSecret = Boolean(secret);
             socket.emit("join-room", {
-                roomId,
+                roomId: normalizedId,
                 name: nameRef.current,
                 clientId: clientIdRef.current,
-                ...(token ? { inviteToken: token } : {}),
-                ...(secret ? { roomSecret: secret } : {}),
+                ...(useSecret ? { roomSecret: secret! } : {}),
+                ...(!useSecret && token ? { inviteToken: token } : {}),
             });
+        };
+
+        const bootstrapRoom = () => {
+            const targetRoom =
+                currentRoomIdRef.current?.trim() ||
+                demoRoomIdRef.current?.trim() ||
+                loadActiveRoomSession()?.roomId?.trim() ||
+                "";
+
+            const secret =
+                roomSecretRef.current ||
+                (targetRoom ? loadRoomSecret(targetRoom) : null) ||
+                demoRoomSecretRef.current?.trim() ||
+                null;
+            const token =
+                inviteTokenRef.current ||
+                (targetRoom ? loadInviteToken(targetRoom) : null) ||
+                demoInviteTokenRef.current?.trim() ||
+                null;
+
+            if (targetRoom && (secret || token)) {
+                emitJoinRoom(targetRoom);
+                return;
+            }
+
+            if (modeRef.current === "create" && !createRoomSentRef.current) {
+                createRoomSentRef.current = true;
+                socket.emit("create-room", {
+                    name: nameRef.current,
+                    clientId: clientIdRef.current,
+                });
+                return;
+            }
+
+            if (targetRoom) {
+                showToast("Missing invite link — ask the host to share it again.", "error");
+            }
         };
 
         socket.on("connect", () => {
@@ -877,17 +934,7 @@ export const Room = ({
                 tearDownPeers();
             }
 
-            const knownRoomId = currentRoomIdRef.current?.trim();
-            const requestedJoinId = demoRoomIdRef.current?.trim();
-            const joinId = knownRoomId || requestedJoinId;
-            if (joinId) {
-                emitJoinRoom(joinId);
-            } else {
-                socket.emit("create-room", {
-                    name: nameRef.current,
-                    clientId: clientIdRef.current,
-                });
-            }
+            bootstrapRoom();
 
             if (isReconnect) showToast("Reconnected", "info");
         });
@@ -915,6 +962,8 @@ export const Room = ({
                 roomSecretRef.current = roomSecret;
                 inviteTokenRef.current = inviteToken;
                 saveRoomSecret(roomId, roomSecret);
+                saveInviteToken(roomId, inviteToken);
+                saveActiveRoomSession(roomId, true);
                 isHostRef.current = true;
                 setIsHost(true);
             }
@@ -923,7 +972,10 @@ export const Room = ({
         socket.on("invite-token-refreshed", ({ inviteToken }: { inviteToken: string }) => {
             inviteTokenRef.current = inviteToken;
             const roomId = currentRoomIdRef.current;
-            if (roomId) saveInviteToken(roomId, inviteToken);
+            if (roomId) {
+                saveInviteToken(roomId, inviteToken);
+                saveActiveRoomSession(roomId, isHostRef.current);
+            }
         });
 
         socket.on("room-locked", ({ locked }: { locked: boolean }) => {
@@ -947,10 +999,29 @@ export const Room = ({
 
         socket.on(
             "room-joined",
-            ({ roomId, participants: existing }: { roomId: string; participants: PeerSummary[] }) => {
+            ({
+                roomId,
+                participants: existing,
+                isHost: joinedAsHost,
+            }: {
+                roomId: string;
+                participants: PeerSummary[];
+                isHost?: boolean;
+            }) => {
                 setLobby(false);
                 setCurrentRoomId(roomId);
                 currentRoomIdRef.current = roomId;
+                if (joinedAsHost !== undefined) {
+                    isHostRef.current = joinedAsHost;
+                    setIsHost(joinedAsHost);
+                    saveActiveRoomSession(roomId, joinedAsHost);
+                } else if (roomSecretRef.current) {
+                    isHostRef.current = true;
+                    setIsHost(true);
+                    saveActiveRoomSession(roomId, true);
+                } else {
+                    saveActiveRoomSession(roomId, isHostRef.current);
+                }
                 existing.forEach((p) => {
                     registerPeer(p.id, p.name);
                     ensurePeerConnection(p.id, p.name);
@@ -1113,6 +1184,10 @@ export const Room = ({
             showToast(message || "Could not join room", "error");
         });
 
+        socket.on("room-lock-error", ({ message }: { message: string }) => {
+            showToast(message || "Could not change room lock", "error");
+        });
+
         return () => {
             stopScreenShare();
             peersRef.current.forEach((pc) => pc.close());
@@ -1217,9 +1292,16 @@ export const Room = ({
     }, [localVideoTrack]);
 
     const handleToggleRoomLock = useCallback(() => {
-        if (!isHostRef.current) return;
+        if (!isHostRef.current) {
+            showToast("Only the host can lock this room.", "error");
+            return;
+        }
+        if (!currentRoomIdRef.current) {
+            showToast("Still connecting to the room…", "error");
+            return;
+        }
         socketRef.current?.emit("lock-room", { locked: !isRoomLocked });
-    }, [isRoomLocked]);
+    }, [isRoomLocked, showToast]);
 
     const handleCopyRoomId = useCallback(() => {
         if (!displayedRoomId) return;
@@ -1256,6 +1338,7 @@ export const Room = ({
         peerDeathTimersRef.current.forEach((t) => window.clearTimeout(t));
         peerDeathTimersRef.current.clear();
         disposeMixedAudio();
+        clearActiveRoomSession();
         socketRef.current?.disconnect();
         socketRef.current = null;
         window.location.reload();

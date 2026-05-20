@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { parseInviteFromUrl, saveInviteToken } from "../lib/session";
+import { clearActiveRoomSession, parseInviteFromUrl, saveInviteToken } from "../lib/session";
 import { Room } from "./Room";
 
 export const Landing = () => {
@@ -95,6 +95,7 @@ export const Landing = () => {
                 name={name}
                 localAudioTrack={localAudioTrack}
                 localVideoTrack={localVideoTrack}
+                mode={requestedRoomId ? "join" : "create"}
                 demoRoomId={requestedRoomId}
                 demoInviteToken={inviteToken.trim() || undefined}
                 demoRoomSecret={legacyRoomKey.trim() || undefined}
@@ -458,6 +459,7 @@ export const Landing = () => {
                                 className="btn btn-secondary"
                                 disabled={!name.trim()}
                                 onClick={() => {
+                                    clearActiveRoomSession();
                                     setRequestedRoomId(undefined);
                                     setRoomId("");
                                     setJoined(true);
