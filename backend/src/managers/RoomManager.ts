@@ -229,6 +229,13 @@ export class RoomManager {
         if (user.clientId) {
             const oldSocketId = room.clientIds.get(user.clientId);
             if (oldSocketId && oldSocketId !== user.socket.id) {
+                const oldUser = room.participants.get(oldSocketId);
+                console.log(
+                    `[${new Date().toISOString()}] [reconnect]  room=${normalized}` +
+                        ` clientId=${user.clientId.slice(0, 8)}…` +
+                        ` evict=${oldSocketId} (${oldUser?.name ?? "?"})` +
+                        ` → ${user.socket.id} (${user.name})`
+                );
                 this.evictSocket(room, normalized, oldSocketId);
             }
         }

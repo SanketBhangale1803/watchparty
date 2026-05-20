@@ -1,11 +1,18 @@
-const CLIENT_ID_KEY = "closr-client-id";
+const HOST_CLIENT_ID_KEY = "closr-client-id";
+const TAB_CLIENT_ID_KEY = "closr-tab-client-id";
 
-export function getClientId(): string {
+/**
+ * Host: stable id in localStorage (survives refresh/reconnect).
+ * Guest: per-tab id in sessionStorage so two tabs are two participants.
+ */
+export function getClientId(role: "create" | "join" = "join"): string {
+    const storageKey = role === "create" ? HOST_CLIENT_ID_KEY : TAB_CLIENT_ID_KEY;
+    const storage = role === "create" ? localStorage : sessionStorage;
     try {
-        let id = localStorage.getItem(CLIENT_ID_KEY);
+        let id = storage.getItem(storageKey);
         if (!id) {
             id = crypto.randomUUID();
-            localStorage.setItem(CLIENT_ID_KEY, id);
+            storage.setItem(storageKey, id);
         }
         return id;
     } catch {

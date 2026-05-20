@@ -368,7 +368,7 @@ export const Room = ({
     const demoRoomSecretRef = useRef(demoRoomSecret);
     const demoInviteTokenRef = useRef(demoInviteToken);
     const nameRef = useRef(name);
-    const clientIdRef = useRef(getClientId());
+    const clientIdRef = useRef(getClientId(mode));
     const roomSecretRef = useRef<string | null>(
         demoRoomSecret?.trim() || restoredSecret || null
     );
@@ -941,14 +941,12 @@ export const Room = ({
                 saveRoomSecret(normalizedId, secret);
             }
 
-            // Host should always send the room secret on reconnect — invite tokens expire.
-            const useSecret = Boolean(secret);
             socket.emit("join-room", {
                 roomId: normalizedId,
                 name: nameRef.current,
                 clientId: clientIdRef.current,
-                ...(useSecret ? { roomSecret: secret! } : {}),
-                ...(!useSecret && token ? { inviteToken: token } : {}),
+                ...(secret ? { roomSecret: secret } : {}),
+                ...(token ? { inviteToken: token } : {}),
             });
         };
 

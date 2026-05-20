@@ -75,7 +75,7 @@ io.on("connection", (socket: Socket) => {
                 (roomId ? ` room=${roomId}` : "") +
                 ` reason=${reason}`
         );
-        userManager.removeUser(socket.id);
+        userManager.scheduleRemoveUser(socket.id);
     });
 });
 

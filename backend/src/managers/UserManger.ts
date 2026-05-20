@@ -15,11 +15,15 @@ const stamp = () => new Date().toISOString();
 const JOIN_DENIED =
     "Could not join this room. Check your invite link or ask the host for a new one.";
 
+/** Keep participants in the room briefly after disconnect so Socket.IO can reconnect. */
+const DISCONNECT_GRACE_MS = 25_000;
+
 export class UserManager {
     private users: Map<string, User>;
     private roomManager: RoomManager;
     private joinLimiter = new RateLimiter();
     private createLimiter = new RateLimiter();
+    private pendingRemovalTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
     constructor() {
         this.users = new Map<string, User>();
@@ -27,11 +31,35 @@ export class UserManager {
     }
 
     addUser(socket: Socket) {
+        this.cancelRemoveUser(socket.id);
         this.users.set(socket.id, { name: "", socket, clientId: "" });
         this.initHandlers(socket);
     }
 
+    scheduleRemoveUser(socketId: string) {
+        this.cancelRemoveUser(socketId);
+        const timer = setTimeout(() => {
+            this.pendingRemovalTimers.delete(socketId);
+            const user = this.users.get(socketId);
+            console.log(
+                `[${stamp()}] [drop]       socket=${socketId} user="${user?.name ?? "?"}"` +
+                    " (disconnect grace expired)"
+            );
+            this.removeUser(socketId);
+        }, DISCONNECT_GRACE_MS);
+        this.pendingRemovalTimers.set(socketId, timer);
+    }
+
+    cancelRemoveUser(socketId: string) {
+        const timer = this.pendingRemovalTimers.get(socketId);
+        if (timer) {
+            clearTimeout(timer);
+            this.pendingRemovalTimers.delete(socketId);
+        }
+    }
+
     removeUser(socketId: string) {
+        this.cancelRemoveUser(socketId);
         this.users.delete(socketId);
         this.roomManager.removeUser(socketId);
     }
@@ -65,6 +93,7 @@ export class UserManager {
 
                 const user = this.users.get(socket.id);
                 if (!user) return;
+                this.cancelRemoveUser(socket.id);
 
                 const displayName = sanitizeDisplayName(name);
                 if (!displayName) {
@@ -81,7 +110,8 @@ export class UserManager {
 
                 const { roomId, roomSecret, inviteToken } = this.roomManager.createRoom(user);
                 console.log(
-                    `[${stamp()}] [create]     socket=${socket.id} user="${user.name}" room=${roomId} size=1`
+                    `[${stamp()}] [create]     socket=${socket.id} user="${user.name}" room=${roomId} size=1` +
+                        ` hostClientId=${user.clientId.slice(0, 8)}…`
                 );
                 socket.emit("room-created", { roomId, roomSecret, inviteToken, isHost: true });
                 socket.emit("room-joined", { roomId, participants: [], isHost: true });
@@ -111,6 +141,7 @@ export class UserManager {
 
                 const user = this.users.get(socket.id);
                 if (!user || !roomId) return;
+                this.cancelRemoveUser(socket.id);
 
                 const displayName = sanitizeDisplayName(name);
                 if (!displayName) {
@@ -156,7 +187,8 @@ export class UserManager {
 
                 const size = this.roomManager.getRoomSize(result.roomId);
                 console.log(
-                    `[${stamp()}] [join]       socket=${socket.id} user="${user.name}" room=${result.roomId} size=${size}`
+                    `[${stamp()}] [join]       socket=${socket.id} user="${user.name}" room=${result.roomId} size=${size}` +
+                        ` clientId=${user.clientId.slice(0, 8)}…`
                 );
                 socket.emit("invite-token-refreshed", { inviteToken: result.inviteToken });
             }
@@ -211,7 +243,7 @@ export class UserManager {
                 `[${stamp()}] [leave]      socket=${socket.id} user="${user?.name ?? "?"}"` +
                     (roomId ? ` room=${roomId}` : "")
             );
-            this.roomManager.removeUser(socket.id);
+            this.removeUser(socket.id);
         });
     }
 }
