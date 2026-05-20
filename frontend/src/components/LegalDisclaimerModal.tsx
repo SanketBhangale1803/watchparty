@@ -1,19 +1,9 @@
-import { useEffect, useState } from "react";
-
-const LEGAL_ACCEPTED_KEY = "closr_legal_accepted";
+import { useState } from "react";
 
 export const LegalDisclaimerModal = () => {
-    const [isOpen, setIsOpen] = useState(false);
-
-    useEffect(() => {
-        const hasAccepted = localStorage.getItem(LEGAL_ACCEPTED_KEY);
-        if (!hasAccepted) {
-            setIsOpen(true);
-        }
-    }, []);
+    const [isOpen, setIsOpen] = useState(true);
 
     const handleAccept = () => {
-        localStorage.setItem(LEGAL_ACCEPTED_KEY, "true");
         setIsOpen(false);
     };
 
