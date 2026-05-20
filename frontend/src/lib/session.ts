@@ -1,12 +1,11 @@
 const CLIENT_ID_KEY = "closr-client-id";
 
-/** Stable per browser tab — sessionStorage so two tabs can join the same room as different people. */
 export function getClientId(): string {
     try {
-        let id = sessionStorage.getItem(CLIENT_ID_KEY);
+        let id = localStorage.getItem(CLIENT_ID_KEY);
         if (!id) {
             id = crypto.randomUUID();
-            sessionStorage.setItem(CLIENT_ID_KEY, id);
+            localStorage.setItem(CLIENT_ID_KEY, id);
         }
         return id;
     } catch {

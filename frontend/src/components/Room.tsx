@@ -142,9 +142,48 @@ type ParticipantState = {
     sourceStream: MediaStream;
     displayStream: MediaStream;
     cameraStream: MediaStream;
+    /** Screen-only stream for the main stage (remote track ids often differ from sender trackId). */
+    screenShareStream: MediaStream;
     isSharingScreen: boolean;
     screenTrackId: string | null;
 };
+
+function isScreenCaptureTrack(track: MediaStreamTrack): boolean {
+    if (track.kind !== "video") return false;
+    const hint = track.contentHint;
+    if (hint === "detail" || hint === "motion") return true;
+    return /screen|window|tab|monitor|display|web-contents/i.test(track.label);
+}
+
+function pickRemoteScreenTrack(
+    videoTracks: MediaStreamTrack[],
+    announcedTrackId: string | null
+): MediaStreamTrack | null {
+    const live = videoTracks.filter((t) => t.readyState === "live");
+    if (live.length === 0) return null;
+
+    if (announcedTrackId) {
+        const byId = live.find((t) => t.id === announcedTrackId);
+        if (byId) return byId;
+    }
+
+    const byHint = live.find(isScreenCaptureTrack);
+    if (byHint) return byHint;
+
+    if (live.length >= 2) return live[live.length - 1];
+    return null;
+}
+
+function pickRemoteCameraTrack(
+    videoTracks: MediaStreamTrack[],
+    screenTrack: MediaStreamTrack | null
+): MediaStreamTrack | null {
+    const live = videoTracks.filter((t) => t.readyState === "live");
+    if (screenTrack) {
+        return live.find((t) => t.id !== screenTrack.id) ?? null;
+    }
+    return live[0] ?? null;
+}
 
 const ParticipantVideo = ({
     stream,
@@ -172,15 +211,29 @@ const ParticipantVideo = ({
         const video = videoRef.current;
         if (!video) return;
         setIsVideoReady(false);
-        video.srcObject = stream;
-        if (stream) {
-            const hasVidTracks = stream.getVideoTracks().length > 0;
-            setHasVideo(hasVidTracks);
-            video.play().catch(() => undefined);
-        } else {
+
+        if (!stream || stream.getVideoTracks().length === 0) {
+            video.srcObject = null;
             setIsVideoReady(true);
             setHasVideo(false);
+            return;
         }
+
+        const hasVidTracks = stream.getVideoTracks().some((t) => t.readyState === "live");
+        setHasVideo(hasVidTracks);
+        video.srcObject = null;
+        video.srcObject = stream;
+        const playPromise = video.play();
+        if (playPromise) playPromise.catch(() => undefined);
+
+        const onUnmute = () => {
+            setHasVideo(true);
+            void video.play().catch(() => undefined);
+        };
+        stream.getVideoTracks().forEach((t) => t.addEventListener("unmute", onUnmute));
+        return () => {
+            stream.getVideoTracks().forEach((t) => t.removeEventListener("unmute", onUnmute));
+        };
     }, [stream]);
 
     return (
@@ -297,7 +350,6 @@ export const Room = ({
     const [copyConfirmed, setCopyConfirmed] = useState(false);
     const [isRoomLocked, setIsRoomLocked] = useState(false);
     const [isHost, setIsHost] = useState(restoredSession?.isHost ?? false);
-    const [activeScreenSharerId, setActiveScreenSharerId] = useState<string | null>(null);
     const toastTimerRef = useRef<number | null>(null);
 
     const showToast = useCallback((message: string, tone: "info" | "error" = "info") => {
@@ -366,28 +418,27 @@ export const Room = ({
         if (!participant) return;
 
         const allVideoTracks = participant.sourceStream.getVideoTracks();
-        const allAudioTracks = participant.sourceStream.getAudioTracks();
+        const allAudioTracks = participant.sourceStream.getAudioTracks().filter(
+            (t) => t.readyState === "live"
+        );
 
-        const screenTrack = participant.screenTrackId
-            ? allVideoTracks.find((t) => t.id === participant.screenTrackId) ?? null
+        const screenTrack = participant.isSharingScreen
+            ? pickRemoteScreenTrack(allVideoTracks, participant.screenTrackId)
             : null;
-        const cameraTrack = allVideoTracks.find((t) => t.id !== participant.screenTrackId) ?? null;
+        const cameraTrack = pickRemoteCameraTrack(allVideoTracks, screenTrack);
 
-        const selectedVideoTrack = participant.isSharingScreen
-            ? screenTrack || cameraTrack
-            : cameraTrack || screenTrack;
+        const nextScreenShareStream = new MediaStream();
+        if (screenTrack) nextScreenShareStream.addTrack(screenTrack);
 
         const nextDisplayStream = new MediaStream();
-        if (selectedVideoTrack) nextDisplayStream.addTrack(selectedVideoTrack);
+        const tileVideoTrack = participant.isSharingScreen ? cameraTrack : cameraTrack || screenTrack;
+        if (tileVideoTrack) nextDisplayStream.addTrack(tileVideoTrack);
         allAudioTracks.forEach((t) => nextDisplayStream.addTrack(t));
 
         const nextCameraStream = new MediaStream();
-        if (cameraTrack) {
-            nextCameraStream.addTrack(cameraTrack);
-        } else if (screenTrack) {
-            nextCameraStream.addTrack(screenTrack);
-        }
+        if (cameraTrack) nextCameraStream.addTrack(cameraTrack);
 
+        participant.screenShareStream = nextScreenShareStream;
         participant.displayStream = nextDisplayStream;
         participant.cameraStream = nextCameraStream;
         participantStateRef.current.set(participantId, participant);
@@ -404,6 +455,7 @@ export const Room = ({
                 sourceStream: empty,
                 displayStream: new MediaStream(),
                 cameraStream: new MediaStream(),
+                screenShareStream: new MediaStream(),
                 isSharingScreen: screenStatusRef.current.get(peerId)?.isSharing ?? false,
                 screenTrackId: screenStatusRef.current.get(peerId)?.trackId ?? null,
             };
@@ -433,6 +485,7 @@ export const Room = ({
                       sourceStream: stream,
                       displayStream: new MediaStream(),
                       cameraStream: new MediaStream(),
+                      screenShareStream: new MediaStream(),
                       isSharingScreen: screenStatusRef.current.get(participantId)?.isSharing ?? false,
                       screenTrackId: screenStatusRef.current.get(participantId)?.trackId ?? null,
                   };
@@ -636,6 +689,11 @@ export const Room = ({
                     upsertParticipantStream(peerId, currentStream);
                 };
 
+                event.track.onunmute = () => {
+                    const peer = participantStateRef.current.get(peerId);
+                    if (peer?.isSharingScreen) updateDisplayedStream(peerId);
+                };
+
                 upsertParticipantStream(peerId, currentStream);
             };
 
@@ -708,9 +766,6 @@ export const Room = ({
         setScreenPreviewStream(null);
         setIsScreenSharing(false);
         isScreenSharingRef.current = false;
-        setActiveScreenSharerId((prev) =>
-            prev === socketIdRef.current ? null : prev
-        );
         emitScreenShareStatus(false, null);
     }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, syncOutboundAudioTrack]);
 
@@ -718,6 +773,15 @@ export const Room = ({
     stopScreenShareRef.current = stopScreenShare;
 
     const startScreenShare = useCallback(async () => {
+        if (isScreenSharingRef.current) return;
+
+        const remoteSharer = Array.from(participantStateRef.current.values()).find(
+            (p) => p.isSharingScreen
+        );
+        if (remoteSharer) {
+            showToast(`${remoteSharer.name} is already sharing — taking over…`, "info");
+        }
+
         try {
             // Tab/system audio: avoid voice-oriented DSP and forced sample rates (reduces artifacts
             // when mixed with the mic and when encoded for WebRTC).
@@ -777,7 +841,7 @@ export const Room = ({
         } catch (e) {
             console.error("Screen share failed", e);
         }
-    }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, stopScreenShare, syncOutboundAudioTrack]);
+    }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, showToast, stopScreenShare, syncOutboundAudioTrack]);
 
     const toggleScreenShare = useCallback(() => {
         if (isScreenSharing) stopScreenShare();
@@ -1118,40 +1182,45 @@ export const Room = ({
                 senderId,
                 isSharing,
                 trackId,
-                activeSharerId,
             }: {
                 roomId: string;
                 senderId: string;
                 isSharing: boolean;
                 trackId: string | null;
-                activeSharerId?: string | null;
             }) => {
                 const myId = socketIdRef.current;
-                if (activeSharerId !== undefined) {
-                    setActiveScreenSharerId(activeSharerId);
-                } else if (isSharing) {
-                    setActiveScreenSharerId(senderId);
-                } else {
-                    setActiveScreenSharerId((prev) =>
-                        prev === senderId ? null : prev
-                    );
-                }
 
-                if (
-                    isSharing &&
-                    senderId !== myId &&
-                    isScreenSharingRef.current
-                ) {
+                if (isSharing && senderId !== myId && isScreenSharingRef.current) {
                     stopScreenShareRef.current();
                     const sharerName = peerNamesRef.current.get(senderId) ?? "Someone";
                     showToast(`${sharerName} is sharing their screen`, "info");
                 }
 
                 screenStatusRef.current.set(senderId, { isSharing, trackId });
+
+                // Previous sharer stopped — clear their share flag so UI falls back to camera tiles.
+                if (isSharing) {
+                    for (const [peerId, status] of screenStatusRef.current.entries()) {
+                        if (peerId !== senderId && status.isSharing) {
+                            screenStatusRef.current.set(peerId, {
+                                isSharing: false,
+                                trackId: null,
+                            });
+                            const prev = participantStateRef.current.get(peerId);
+                            if (prev) {
+                                prev.isSharingScreen = false;
+                                prev.screenTrackId = null;
+                                participantStateRef.current.set(peerId, prev);
+                                updateDisplayedStream(peerId);
+                            }
+                        }
+                    }
+                }
+
                 const participant = participantStateRef.current.get(senderId);
                 if (!participant) return;
                 participant.isSharingScreen = isSharing;
-                participant.screenTrackId = trackId;
+                participant.screenTrackId = isSharing ? trackId : null;
                 participantStateRef.current.set(senderId, participant);
                 updateDisplayedStream(senderId);
                 syncParticipants();
@@ -1174,9 +1243,6 @@ export const Room = ({
             peerNamesRef.current.delete(participantId);
             makingOfferRef.current.delete(participantId);
             screenStatusRef.current.delete(participantId);
-            setActiveScreenSharerId((prev) =>
-                prev === participantId ? null : prev
-            );
             removeParticipant(participantId);
         });
 
@@ -1238,19 +1304,20 @@ export const Room = ({
     );
 
     const sharingParticipant = useMemo(() => {
-        if (activeScreenSharerId) {
-            const remote = remoteParticipants.find((p) => p.id === activeScreenSharerId);
-            if (remote) {
-                return { id: remote.id, name: remote.name, isLocal: false };
-            }
-            if (isScreenSharing) {
-                return { id: "self", name, isLocal: true };
-            }
-        }
         if (isScreenSharing) return { id: "self", name, isLocal: true };
         const sharing = remoteParticipants.find((p) => p.isSharingScreen);
         return sharing ? { id: sharing.id, name: sharing.name, isLocal: false } : null;
-    }, [activeScreenSharerId, isScreenSharing, remoteParticipants, name]);
+    }, [isScreenSharing, remoteParticipants, name]);
+
+    const remoteScreenShareStream = useMemo(() => {
+        if (!sharingParticipant || sharingParticipant.isLocal) return null;
+        const peer = remoteParticipants.find((p) => p.id === sharingParticipant.id);
+        if (!peer) return null;
+        if (peer.screenShareStream.getVideoTracks().length > 0) {
+            return peer.screenShareStream;
+        }
+        return peer.displayStream;
+    }, [sharingParticipant, remoteParticipants]);
 
     const allTiles = useMemo(() => {
         const tiles = [{ id: "self", name, displayStream: localStreamRef.current, isLocal: true }];
@@ -1581,7 +1648,8 @@ export const Room = ({
                                 )
                             ) : (
                                 <ParticipantVideo
-                                    stream={remoteParticipants.find(p => p.id === sharingParticipant.id)?.displayStream || null}
+                                    key={`screen-${sharingParticipant.id}-${remoteScreenShareStream?.getVideoTracks()[0]?.id ?? "none"}`}
+                                    stream={remoteScreenShareStream}
                                     label={`${sharingParticipant.name} is sharing`}
                                     prioritized
                                     muted
