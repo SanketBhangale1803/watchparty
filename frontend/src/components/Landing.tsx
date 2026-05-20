@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { clearActiveRoomSession, parseInviteFromUrl, saveInviteToken } from "../lib/session";
+import {
+    clearActiveRoomSession,
+    isValidInviteCredentials,
+    parseInviteFromUrl,
+    parseInviteLinkInput,
+    saveInviteToken,
+} from "../lib/session";
 import { Room } from "./Room";
 
 export const Landing = () => {
@@ -16,10 +22,18 @@ export const Landing = () => {
     const [roomId, setRoomId] = useState("");
     const [inviteToken, setInviteToken] = useState("");
     const [legacyRoomKey, setLegacyRoomKey] = useState("");
+    const [inviteLinkInput, setInviteLinkInput] = useState("");
+    const [inviteLinkError, setInviteLinkError] = useState<string | null>(null);
     const [searchParams] = useSearchParams();
     const streamRef = useRef<MediaStream | null>(null);
 
-    const hasInviteFromUrl = Boolean(inviteToken.trim() || legacyRoomKey.trim());
+    const hasValidInvite = isValidInviteCredentials(roomId, inviteToken, legacyRoomKey);
+    const hasInviteFromUrl = Boolean(
+        searchParams.get("room")?.trim() &&
+            (searchParams.get("t")?.trim() ||
+                searchParams.get("token")?.trim() ||
+                searchParams.get("key")?.trim())
+    );
     const [entryMode, setEntryMode] = useState<"join" | "create">("create");
 
     useEffect(() => {
@@ -108,10 +122,46 @@ export const Landing = () => {
         );
     }
 
+    const applyInviteLink = (value: string) => {
+        setInviteLinkInput(value);
+        if (!value.trim()) {
+            setRoomId("");
+            setInviteToken("");
+            setLegacyRoomKey("");
+            setInviteLinkError(null);
+            return;
+        }
+
+        const parsed = parseInviteLinkInput(value);
+        if (!parsed) {
+            setRoomId("");
+            setInviteToken("");
+            setLegacyRoomKey("");
+            setInviteLinkError(
+                "Paste the host's full invite link (must include ?room=… and ?t=…). Room codes alone won't work."
+            );
+            return;
+        }
+
+        setInviteLinkError(null);
+        setRoomId(parsed.roomId);
+        setInviteToken(parsed.inviteToken ?? "");
+        setLegacyRoomKey(parsed.legacySecret ?? "");
+        if (parsed.inviteToken) {
+            saveInviteToken(parsed.roomId, parsed.inviteToken);
+        }
+    };
+
     const handleJoin = () => {
-        const joinId = roomId.trim();
-        if (!joinId || (!inviteToken.trim() && !legacyRoomKey.trim())) return;
-        setRequestedRoomId(joinId);
+        if (!name.trim() || !isValidInviteCredentials(roomId, inviteToken, legacyRoomKey)) {
+            if (!hasInviteFromUrl) {
+                setInviteLinkError(
+                    "Paste the host's full invite link (must include ?room=… and ?t=…)."
+                );
+            }
+            return;
+        }
+        setRequestedRoomId(roomId.trim());
         setJoined(true);
     };
 
@@ -251,62 +301,63 @@ export const Landing = () => {
 
                         {(entryMode === "join" || hasInviteFromUrl) && (
                             <div className="landing-form">
-                                {hasInviteFromUrl && (
+                                {hasInviteFromUrl ? (
                                     <p className="landing-invite-banner">
-                                        Invite link detected — enter your name and join.
+                                        Invite link detected — room{" "}
+                                        <strong style={{ letterSpacing: "0.06em" }}>{roomId}</strong>
+                                        . Enter your name and join.
                                     </p>
-                                )}
-                                <label className="landing-label" htmlFor="landing-room">
-                                    Room code
-                                </label>
-                                <input
-                                    id="landing-room"
-                                    className="input landing-input"
-                                    type="text"
-                                    placeholder="From invite link"
-                                    value={roomId}
-                                    onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-                                    style={{ letterSpacing: "0.08em", textTransform: "uppercase" }}
-                                />
-                                {!hasInviteFromUrl && (
+                                ) : (
                                     <>
-                                        <label className="landing-label" htmlFor="landing-token">
-                                            Invite token
+                                        <label className="landing-label" htmlFor="landing-invite-link">
+                                            Invite link
                                         </label>
                                         <input
-                                            id="landing-token"
+                                            id="landing-invite-link"
                                             className="input landing-input"
-                                            type="text"
-                                            placeholder="Paste ?t=… from invite link"
-                                            value={inviteToken || legacyRoomKey}
-                                            onChange={(e) => {
-                                                setInviteToken(e.target.value.trim());
-                                                setLegacyRoomKey("");
+                                            type="url"
+                                            inputMode="url"
+                                            placeholder="https://yoursite.com/?room=…&t=…"
+                                            value={inviteLinkInput}
+                                            onChange={(e) => applyInviteLink(e.target.value)}
+                                            onPaste={(e) => {
+                                                const pasted = e.clipboardData.getData("text");
+                                                if (pasted) {
+                                                    e.preventDefault();
+                                                    applyInviteLink(pasted);
+                                                }
                                             }}
                                             autoComplete="off"
                                             spellCheck={false}
                                         />
+                                        {inviteLinkError && (
+                                            <p className="landing-hint" style={{ color: "#fecaca" }}>
+                                                {inviteLinkError}
+                                            </p>
+                                        )}
+                                        {hasValidInvite && !inviteLinkError && (
+                                            <p className="landing-invite-banner">
+                                                Link OK — room <strong>{roomId}</strong>
+                                            </p>
+                                        )}
                                     </>
                                 )}
                                 <div className="landing-actions">
                                     <button
                                         type="button"
                                         className="btn btn-primary"
-                                        disabled={
-                                            !name.trim() ||
-                                            !roomId.trim() ||
-                                            (!hasInviteFromUrl &&
-                                                !inviteToken.trim() &&
-                                                !legacyRoomKey.trim())
-                                        }
+                                        disabled={!name.trim() || !hasValidInvite}
                                         onClick={handleJoin}
                                     >
                                         Join room
                                     </button>
                                 </div>
-                                <p className="landing-hint">
-                                    Use the host&apos;s full invite link. Room codes alone cannot be guessed to join.
-                                </p>
+                                {!hasInviteFromUrl && (
+                                    <p className="landing-hint">
+                                        Ask the host to copy the full invite link from the call — not just the
+                                        room code.
+                                    </p>
+                                )}
                             </div>
                         )}
 
