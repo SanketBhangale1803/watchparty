@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { parseInviteFromUrl } from "../lib/session";
 import { Room } from "./Room";
 
 export const Landing = () => {
@@ -12,7 +14,19 @@ export const Landing = () => {
     const [camEnabled, setCamEnabled] = useState(true);
     const [mediaError, setMediaError] = useState<string | null>(null);
     const [roomId, setRoomId] = useState("");
+    const [inviteToken, setInviteToken] = useState("");
+    const [legacyRoomKey, setLegacyRoomKey] = useState("");
+    const [searchParams] = useSearchParams();
     const streamRef = useRef<MediaStream | null>(null);
+
+    const hasInviteFromUrl = Boolean(inviteToken.trim() || legacyRoomKey.trim());
+
+    useEffect(() => {
+        const { roomId: r, inviteToken: t, legacySecret } = parseInviteFromUrl(searchParams);
+        if (r) setRoomId(r);
+        if (t) setInviteToken(t);
+        if (legacySecret) setLegacyRoomKey(legacySecret);
+    }, [searchParams]);
 
     const getCam = async () => {
         try {
@@ -25,9 +39,8 @@ export const Landing = () => {
                 },
                 audio: {
                     echoCancellation: true,
-                    // Heavy DSP often sounds metallic/robotic on many devices.
                     noiseSuppression: false,
-                    autoGainControl: true,
+                    autoGainControl: false,
                     channelCount: 1,
                 },
             });
@@ -82,6 +95,8 @@ export const Landing = () => {
                 localAudioTrack={localAudioTrack}
                 localVideoTrack={localVideoTrack}
                 demoRoomId={requestedRoomId}
+                demoInviteToken={inviteToken.trim() || undefined}
+                demoRoomSecret={legacyRoomKey.trim() || undefined}
             />
         );
     }
@@ -343,29 +358,74 @@ export const Landing = () => {
                             >
                                 Room code
                             </label>
-                            <div style={{ display: "flex", gap: "0.6rem" }}>
-                                <input
-                                    className="input"
-                                    type="text"
-                                    placeholder="6-character code"
-                                    value={roomId}
-                                    onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-                                    style={{ letterSpacing: "0.1em", textTransform: "uppercase" }}
-                                />
-                                <button
-                                    className="btn btn-primary"
-                                    disabled={!name.trim() || !roomId.trim()}
-                                    onClick={() => {
-                                        const joinId = roomId.trim();
-                                        if (!joinId) return;
-                                        setRequestedRoomId(joinId);
-                                        setJoined(true);
+                            <input
+                                className="input"
+                                type="text"
+                                placeholder="Room code from invite"
+                                value={roomId}
+                                onChange={(e) => setRoomId(e.target.value.toUpperCase())}
+                                style={{ letterSpacing: "0.1em", textTransform: "uppercase" }}
+                            />
+                            {hasInviteFromUrl ? (
+                                <p
+                                    style={{
+                                        fontSize: "0.85rem",
+                                        color: "var(--success)",
+                                        background: "rgba(34, 197, 94, 0.12)",
+                                        border: "1px solid rgba(34, 197, 94, 0.35)",
+                                        padding: "0.65rem 0.85rem",
+                                        borderRadius: "0.65rem",
                                     }}
-                                    style={{ minWidth: "110px" }}
                                 >
-                                    Join
-                                </button>
-                            </div>
+                                    Invite link detected — enter your name and join.
+                                </p>
+                            ) : (
+                                <>
+                                    <label
+                                        style={{
+                                            fontSize: "0.75rem",
+                                            color: "var(--text-muted)",
+                                            letterSpacing: "0.06em",
+                                            textTransform: "uppercase",
+                                            marginTop: "0.25rem",
+                                        }}
+                                    >
+                                        Invite token (legacy key)
+                                    </label>
+                                    <input
+                                        className="input"
+                                        type="text"
+                                        placeholder="Paste from invite link (?t=…)"
+                                        value={inviteToken || legacyRoomKey}
+                                        onChange={(e) => {
+                                            setInviteToken(e.target.value.trim());
+                                            setLegacyRoomKey("");
+                                        }}
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                    />
+                                </>
+                            )}
+                            <button
+                                className="btn btn-primary"
+                                disabled={
+                                    !name.trim() ||
+                                    !roomId.trim() ||
+                                    (!inviteToken.trim() && !legacyRoomKey.trim())
+                                }
+                                onClick={() => {
+                                    const joinId = roomId.trim();
+                                    if (!joinId || (!inviteToken.trim() && !legacyRoomKey.trim())) return;
+                                    setRequestedRoomId(joinId);
+                                    setJoined(true);
+                                }}
+                                style={{ width: "100%", padding: "0.95rem 1.5rem" }}
+                            >
+                                Join room
+                            </button>
+                            <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", lineHeight: 1.45 }}>
+                                Use the host&apos;s full invite link. Room codes alone cannot be guessed to join.
+                            </p>
 
                             <div style={{ position: "relative", margin: "0.4rem 0" }}>
                                 <div

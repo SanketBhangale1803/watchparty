@@ -1,9 +1,24 @@
+import crypto from "crypto";
 import { User } from "./UserManger";
+import {
+    ROOM_EMPTY_TTL_MS,
+    ROOM_MAX_LIFETIME_MS,
+    createInviteToken,
+    hashRoomSecret,
+    isValidRoomId,
+    verifyInviteToken,
+    verifyRoomSecret,
+} from "../security";
 
 interface Room {
+    secretHash: string;
+    hostClientId: string;
+    locked: boolean;
     participants: Map<string, User>;
+    clientIds: Map<string, string>;
     createdAt: number;
     lastActivityAt: number;
+    expiresAt: number;
 }
 
 type Participant = {
@@ -23,20 +38,27 @@ type IceCandidatePayload = {
     usernameFragment?: string;
 };
 
-/**
- * Friendly 6-character room IDs (omit ambiguous chars: 0/O, 1/I/L).
- * Collisions are negligible at this scale; we just retry a few times.
- */
 const ROOM_ID_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 function makeRoomId(): string {
     let out = "";
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
         out += ROOM_ID_ALPHABET[Math.floor(Math.random() * ROOM_ID_ALPHABET.length)];
     }
     return out;
 }
 
-const ROOM_MAX_PARTICIPANTS = 32;
+function makeRoomSecret(): string {
+    return crypto.randomBytes(24).toString("hex");
+}
+
+const ROOM_MAX_PARTICIPANTS = Number(process.env.ROOM_MAX_PARTICIPANTS) || 12;
+
+export type JoinResult =
+    | { ok: true; roomId: string; inviteToken: string }
+    | {
+          ok: false;
+          reason: "full" | "not_found" | "forbidden" | "invalid" | "locked" | "expired";
+      };
 
 export class RoomManager {
     private rooms: Map<string, Room>;
@@ -45,6 +67,7 @@ export class RoomManager {
     constructor() {
         this.rooms = new Map<string, Room>();
         this.userRoomMap = new Map<string, string>();
+        setInterval(() => this.pruneExpiredRooms(), 60_000);
     }
 
     private normalizeRoomId(roomId: string): string {
@@ -64,46 +87,128 @@ export class RoomManager {
         room.lastActivityAt = Date.now();
     }
 
-    createRoom(host: User, preferredId?: string): string {
-        let roomId = preferredId ? this.normalizeRoomId(preferredId) : "";
-        if (!roomId || this.rooms.has(roomId)) {
-            for (let i = 0; i < 8; i++) {
-                const candidate = makeRoomId();
-                if (!this.rooms.has(candidate)) {
-                    roomId = candidate;
-                    break;
-                }
-            }
-            if (!roomId) roomId = makeRoomId();
-        }
-
-        const participants = new Map<string, User>();
-        participants.set(host.socket.id, host);
-        const now = Date.now();
-        this.rooms.set(roomId, { participants, createdAt: now, lastActivityAt: now });
-        this.userRoomMap.set(host.socket.id, roomId);
-        return roomId;
+    private isRoomExpired(room: Room): boolean {
+        return Date.now() > room.expiresAt;
     }
 
-    /**
-     * Join an existing room, or transparently create it if it has been lost
-     * (e.g. signaling server restarted). Returns an outcome that lets the
-     * caller tell the client whether they joined a fresh or existing room.
-     */
-    joinRoom(roomId: string, user: User): { ok: true; created: boolean; roomId: string } | { ok: false; reason: "full" } {
-        const normalized = this.normalizeRoomId(roomId);
-        let room = this.rooms.get(normalized);
+    private pruneExpiredRooms() {
+        const now = Date.now();
+        for (const [roomId, room] of this.rooms.entries()) {
+            const emptyTooLong =
+                room.participants.size === 0 && now - room.lastActivityAt > ROOM_EMPTY_TTL_MS;
+            if (this.isRoomExpired(room) || emptyTooLong) {
+                this.rooms.delete(roomId);
+            }
+        }
+    }
 
-        if (!room) {
-            const id = this.createRoom(user, normalized);
-            const created = this.rooms.get(id)!;
-            // The host gets a confirmation event too so the UI can stay in sync.
-            user.socket.emit("room-joined", {
-                roomId: id,
-                participants: [],
+    private evictSocket(room: Room, roomId: string, socketId: string) {
+        if (!room.participants.has(socketId)) return;
+
+        room.participants.delete(socketId);
+        this.userRoomMap.delete(socketId);
+
+        for (const [clientId, sid] of room.clientIds.entries()) {
+            if (sid === socketId) {
+                room.clientIds.delete(clientId);
+                break;
+            }
+        }
+
+        room.participants.forEach((participant) => {
+            participant.socket.emit("participant-left", {
+                roomId,
+                participantId: socketId,
             });
-            this.touch(created);
-            return { ok: true, created: true, roomId: id };
+        });
+    }
+
+    private authorizeJoin(
+        room: Room,
+        roomId: string,
+        roomSecret?: string,
+        inviteToken?: string
+    ): boolean {
+        if (inviteToken?.trim() && verifyInviteToken(roomId, inviteToken)) {
+            return true;
+        }
+        if (roomSecret?.trim() && verifyRoomSecret(roomSecret, room.secretHash)) {
+            return true;
+        }
+        return false;
+    }
+
+    createRoom(host: User): { roomId: string; roomSecret: string; inviteToken: string } {
+        let roomId = "";
+        for (let i = 0; i < 12; i++) {
+            const candidate = makeRoomId();
+            if (!this.rooms.has(candidate)) {
+                roomId = candidate;
+                break;
+            }
+        }
+        if (!roomId) roomId = makeRoomId();
+
+        const roomSecret = makeRoomSecret();
+        const now = Date.now();
+        const participants = new Map<string, User>();
+        participants.set(host.socket.id, host);
+
+        const clientIds = new Map<string, string>();
+        if (host.clientId) clientIds.set(host.clientId, host.socket.id);
+
+        this.rooms.set(roomId, {
+            secretHash: hashRoomSecret(roomSecret),
+            hostClientId: host.clientId,
+            locked: false,
+            participants,
+            clientIds,
+            createdAt: now,
+            lastActivityAt: now,
+            expiresAt: now + ROOM_MAX_LIFETIME_MS,
+        });
+        this.userRoomMap.set(host.socket.id, roomId);
+
+        const inviteToken = createInviteToken(roomId);
+        return { roomId, roomSecret, inviteToken };
+    }
+
+    joinRoom(
+        roomId: string,
+        user: User,
+        opts: { roomSecret?: string; inviteToken?: string }
+    ): JoinResult {
+        const normalized = this.normalizeRoomId(roomId);
+
+        if (!isValidRoomId(normalized)) {
+            return { ok: false, reason: "invalid" };
+        }
+
+        const room = this.rooms.get(normalized);
+        if (!room) {
+            return { ok: false, reason: "not_found" };
+        }
+
+        if (this.isRoomExpired(room)) {
+            this.rooms.delete(normalized);
+            return { ok: false, reason: "expired" };
+        }
+
+        if (!this.authorizeJoin(room, normalized, opts.roomSecret, opts.inviteToken)) {
+            return { ok: false, reason: "forbidden" };
+        }
+
+        const isHost = user.clientId === room.hostClientId;
+
+        if (room.locked && !isHost && !room.participants.has(user.socket.id)) {
+            return { ok: false, reason: "locked" };
+        }
+
+        if (user.clientId) {
+            const oldSocketId = room.clientIds.get(user.clientId);
+            if (oldSocketId && oldSocketId !== user.socket.id) {
+                this.evictSocket(room, normalized, oldSocketId);
+            }
         }
 
         if (room.participants.has(user.socket.id)) {
@@ -113,8 +218,9 @@ export class RoomManager {
                     .filter(([id]) => id !== user.socket.id)
                     .map(([, p]) => ({ id: p.socket.id, name: p.name })),
             });
+            if (user.clientId) room.clientIds.set(user.clientId, user.socket.id);
             this.touch(room);
-            return { ok: true, created: false, roomId: normalized };
+            return { ok: true, roomId: normalized, inviteToken: createInviteToken(normalized) };
         }
 
         if (room.participants.size >= ROOM_MAX_PARTICIPANTS) {
@@ -131,6 +237,7 @@ export class RoomManager {
 
         room.participants.set(user.socket.id, user);
         this.userRoomMap.set(user.socket.id, normalized);
+        if (user.clientId) room.clientIds.set(user.clientId, user.socket.id);
         this.touch(room);
 
         user.socket.emit("room-joined", {
@@ -150,25 +257,70 @@ export class RoomManager {
             }
         });
 
-        return { ok: true, created: false, roomId: normalized };
+        return { ok: true, roomId: normalized, inviteToken: createInviteToken(normalized) };
+    }
+
+    setRoomLocked(socketId: string, locked: boolean): boolean {
+        const located = this.getRoomForSocket(socketId);
+        if (!located) return false;
+
+        const { room } = located;
+        const user = room.participants.get(socketId);
+        if (!user || user.clientId !== room.hostClientId) return false;
+
+        room.locked = locked;
+        this.touch(room);
+
+        room.participants.forEach((participant) => {
+            participant.socket.emit("room-locked", { roomId: located.roomId, locked });
+        });
+
+        return true;
+    }
+
+    private getRoomForSocket(socketId: string): { room: Room; roomId: string } | null {
+        const roomId = this.userRoomMap.get(socketId);
+        if (!roomId) return null;
+        const room = this.rooms.get(roomId);
+        if (!room) return null;
+        return { room, roomId };
+    }
+
+    /** Signaling is only allowed from a socket that belongs to the claimed room. */
+    private assertSenderInRoom(senderSocketId: string, claimedRoomId: string): Room | null {
+        const located = this.getRoomForSocket(senderSocketId);
+        if (!located) return null;
+        if (located.roomId !== this.normalizeRoomId(claimedRoomId)) return null;
+        if (this.isRoomExpired(located.room)) return null;
+        return located.room;
     }
 
     forwardOffer(roomId: string, senderSocketId: string, targetSocketId: string, sdp: SessionDescriptionPayload) {
-        const room = this.rooms.get(this.normalizeRoomId(roomId));
+        const room = this.assertSenderInRoom(senderSocketId, roomId);
         if (!room) return;
+        if (!room.participants.has(senderSocketId) || !room.participants.has(targetSocketId)) return;
         const targetUser = room.participants.get(targetSocketId);
         if (!targetUser) return;
         this.touch(room);
-        targetUser.socket.emit("offer", { roomId: this.normalizeRoomId(roomId), fromId: senderSocketId, sdp });
+        targetUser.socket.emit("offer", {
+            roomId: this.normalizeRoomId(roomId),
+            fromId: senderSocketId,
+            sdp,
+        });
     }
 
     forwardAnswer(roomId: string, senderSocketId: string, targetSocketId: string, sdp: SessionDescriptionPayload) {
-        const room = this.rooms.get(this.normalizeRoomId(roomId));
+        const room = this.assertSenderInRoom(senderSocketId, roomId);
         if (!room) return;
+        if (!room.participants.has(senderSocketId) || !room.participants.has(targetSocketId)) return;
         const targetUser = room.participants.get(targetSocketId);
         if (!targetUser) return;
         this.touch(room);
-        targetUser.socket.emit("answer", { roomId: this.normalizeRoomId(roomId), fromId: senderSocketId, sdp });
+        targetUser.socket.emit("answer", {
+            roomId: this.normalizeRoomId(roomId),
+            fromId: senderSocketId,
+            sdp,
+        });
     }
 
     forwardIceCandidate(
@@ -177,8 +329,9 @@ export class RoomManager {
         targetSocketId: string,
         candidate: IceCandidatePayload
     ) {
-        const room = this.rooms.get(this.normalizeRoomId(roomId));
+        const room = this.assertSenderInRoom(senderSocketId, roomId);
         if (!room) return;
+        if (!room.participants.has(senderSocketId) || !room.participants.has(targetSocketId)) return;
         const targetUser = room.participants.get(targetSocketId);
         if (!targetUser) return;
         this.touch(room);
@@ -190,8 +343,8 @@ export class RoomManager {
     }
 
     onScreenShareStatus(roomId: string, senderSocketId: string, isSharing: boolean, trackId: string | null) {
-        const room = this.rooms.get(this.normalizeRoomId(roomId));
-        if (!room) return;
+        const room = this.assertSenderInRoom(senderSocketId, roomId);
+        if (!room || !room.participants.has(senderSocketId)) return;
         this.touch(room);
         room.participants.forEach((participant) => {
             if (participant.socket.id !== senderSocketId) {
@@ -206,28 +359,17 @@ export class RoomManager {
     }
 
     removeUser(socketId: string) {
-        const roomId = this.userRoomMap.get(socketId);
-        if (!roomId) return;
-
-        const room = this.rooms.get(roomId);
-        if (!room) {
+        const located = this.getRoomForSocket(socketId);
+        if (!located) {
             this.userRoomMap.delete(socketId);
             return;
         }
 
-        room.participants.delete(socketId);
-        this.userRoomMap.delete(socketId);
-        this.touch(room);
-
-        room.participants.forEach((participant) => {
-            participant.socket.emit("participant-left", {
-                roomId,
-                participantId: socketId,
-            });
-        });
+        const { room, roomId } = located;
+        this.evictSocket(room, roomId, socketId);
 
         if (room.participants.size === 0) {
-            this.rooms.delete(roomId);
+            room.lastActivityAt = Date.now();
         }
     }
 }

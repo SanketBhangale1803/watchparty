@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Socket, io } from "socket.io-client";
+import {
+    buildInviteLink,
+    getClientId,
+    loadRoomSecret,
+    saveRoomSecret,
+} from "../lib/session";
 
 const DEFAULT_BACKEND_URL = "https://closr-live.onrender.com";
 const normalizeBackendUrl = (rawUrl: string): string => {
@@ -80,9 +86,8 @@ async function tuneAudioSender(sender: RTCRtpSender): Promise<void> {
                 networkPriority?: string;
                 priority?: string;
             }).priority = "high";
-            // 32 kbps is plenty for stereo Opus voice; cap to avoid runaway bursts.
-            if (enc.maxBitrate == null || enc.maxBitrate > 64_000) {
-                enc.maxBitrate = 64_000;
+            if (enc.maxBitrate == null || enc.maxBitrate > 128_000) {
+                enc.maxBitrate = 128_000;
             }
         }
 
@@ -253,11 +258,16 @@ export const Room = ({
     localAudioTrack,
     localVideoTrack,
     demoRoomId,
+    demoRoomSecret,
+    demoInviteToken,
 }: {
     name: string;
     localAudioTrack: MediaStreamTrack | null;
     localVideoTrack: MediaStreamTrack | null;
     demoRoomId?: string;
+    /** Legacy: raw room key (old invite links). Prefer demoInviteToken. */
+    demoRoomSecret?: string;
+    demoInviteToken?: string;
 }) => {
     const [, setLobby] = useState(true);
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
@@ -273,6 +283,8 @@ export const Room = ({
     const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "reconnecting">("connecting");
     const [toast, setToast] = useState<{ message: string; tone: "info" | "error" } | null>(null);
     const [copyConfirmed, setCopyConfirmed] = useState(false);
+    const [isRoomLocked, setIsRoomLocked] = useState(false);
+    const [isHost, setIsHost] = useState(false);
     const toastTimerRef = useRef<number | null>(null);
 
     const showToast = useCallback((message: string, tone: "info" | "error" = "info") => {
@@ -288,9 +300,17 @@ export const Room = ({
     const socketIdRef = useRef<string | null>(null);
     const currentRoomIdRef = useRef<string | null>(null);
     const demoRoomIdRef = useRef(demoRoomId);
+    const demoRoomSecretRef = useRef(demoRoomSecret);
+    const demoInviteTokenRef = useRef(demoInviteToken);
     const nameRef = useRef(name);
+    const clientIdRef = useRef(getClientId());
+    const roomSecretRef = useRef<string | null>(demoRoomSecret?.trim() || null);
+    const inviteTokenRef = useRef<string | null>(demoInviteToken?.trim() || null);
+    const isHostRef = useRef(false);
 
     demoRoomIdRef.current = demoRoomId;
+    demoRoomSecretRef.current = demoRoomSecret;
+    demoInviteTokenRef.current = demoInviteToken;
     nameRef.current = name;
 
     /** Show room id only after server confirms it. */
@@ -353,16 +373,37 @@ export const Room = ({
         participantStateRef.current.set(participantId, participant);
     }, []);
 
+    const registerPeer = useCallback(
+        (peerId: string, peerName: string) => {
+            peerNamesRef.current.set(peerId, peerName);
+            if (participantStateRef.current.has(peerId)) return;
+            const empty = new MediaStream();
+            const nextState: ParticipantState = {
+                id: peerId,
+                name: peerName,
+                sourceStream: empty,
+                displayStream: new MediaStream(),
+                cameraStream: new MediaStream(),
+                isSharingScreen: screenStatusRef.current.get(peerId)?.isSharing ?? false,
+                screenTrackId: screenStatusRef.current.get(peerId)?.trackId ?? null,
+            };
+            participantStateRef.current.set(peerId, nextState);
+            updateDisplayedStream(peerId);
+            syncParticipants();
+        },
+        [syncParticipants, updateDisplayedStream]
+    );
+
     const upsertParticipantStream = useCallback(
         (participantId: string, stream: MediaStream, participantName?: string) => {
+            if (!peerNamesRef.current.has(participantId)) return;
+
             const existing = participantStateRef.current.get(participantId);
-            // Prefer the freshly-supplied name, otherwise our most recent peer-name lookup,
-            // and finally fall back to the existing tile's name so we don't regress to "Guest".
             const resolvedName =
                 participantName ||
                 peerNamesRef.current.get(participantId) ||
-                existing?.name ||
-                "Guest";
+                existing?.name;
+            if (!resolvedName) return;
 
             const nextState: ParticipantState = existing
                 ? { ...existing, sourceStream: stream, name: resolvedName }
@@ -421,27 +462,20 @@ export const Room = ({
 
             const audioContext = new AudioContext();
             const destination = audioContext.createMediaStreamDestination();
-            const compressor = audioContext.createDynamicsCompressor();
-            compressor.threshold.value = -24;
-            compressor.knee.value = 18;
-            compressor.ratio.value = 4;
-            compressor.attack.value = 0.003;
-            compressor.release.value = 0.25;
-            compressor.connect(destination);
 
             if (micTrack) {
                 const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
                 const micGain = audioContext.createGain();
                 micGain.gain.value = 1.0;
                 micSource.connect(micGain);
-                micGain.connect(compressor);
+                micGain.connect(destination);
             }
 
             const screenSource = audioContext.createMediaStreamSource(new MediaStream([screenAudioTrack]));
             const screenGain = audioContext.createGain();
-            screenGain.gain.value = 0.8;
+            screenGain.gain.value = 0.75;
             screenSource.connect(screenGain);
-            screenGain.connect(compressor);
+            screenGain.connect(destination);
 
             audioContext.resume().catch(() => undefined);
 
@@ -575,16 +609,6 @@ export const Room = ({
 
                 if (!currentStream.getTracks().some((t) => t.id === event.track.id)) {
                     currentStream.addTrack(event.track);
-                }
-
-                // Keep remote audio latency low so voice doesn't sound delayed/laggy.
-                if (event.track.kind === "audio") {
-                    const r = event.receiver as RTCRtpReceiver & { playoutDelayHint?: number };
-                    try {
-                        r.playoutDelayHint = 0;
-                    } catch {
-                        /* not supported in this browser */
-                    }
                 }
 
                 event.track.onended = () => {
@@ -804,13 +828,41 @@ export const Room = ({
             syncParticipants();
         };
 
+        const emitJoinRoom = (roomId: string) => {
+            const token =
+                inviteTokenRef.current ||
+                demoInviteTokenRef.current?.trim() ||
+                null;
+            const secret =
+                roomSecretRef.current ||
+                loadRoomSecret(roomId) ||
+                demoRoomSecretRef.current?.trim() ||
+                null;
+
+            if (!token && !secret) {
+                showToast("Missing invite link — ask the host to share it again.", "error");
+                return;
+            }
+
+            if (secret) {
+                roomSecretRef.current = secret;
+                saveRoomSecret(roomId, secret);
+            }
+
+            socket.emit("join-room", {
+                roomId,
+                name: nameRef.current,
+                clientId: clientIdRef.current,
+                ...(token ? { inviteToken: token } : {}),
+                ...(secret ? { roomSecret: secret } : {}),
+            });
+        };
+
         socket.on("connect", () => {
             const isReconnect = socketIdRef.current !== null;
             socketIdRef.current = socket.id ?? null;
             setConnectionStatus("connected");
 
-            // On a reconnect, peers will have new socket ids — drop everything and
-            // re-bootstrap from the server-side participant list.
             if (isReconnect) {
                 tearDownPeers();
             }
@@ -819,9 +871,12 @@ export const Room = ({
             const requestedJoinId = demoRoomIdRef.current?.trim();
             const joinId = knownRoomId || requestedJoinId;
             if (joinId) {
-                socket.emit("join-room", { roomId: joinId, name: nameRef.current });
+                emitJoinRoom(joinId);
             } else {
-                socket.emit("create-room", { name: nameRef.current });
+                socket.emit("create-room", {
+                    name: nameRef.current,
+                    clientId: clientIdRef.current,
+                });
             }
 
             if (isReconnect) showToast("Reconnected", "info");
@@ -834,9 +889,34 @@ export const Room = ({
 
         socket.io.on("reconnect_attempt", () => setConnectionStatus("reconnecting"));
 
-        socket.on("room-created", ({ roomId }: { roomId: string }) => {
-            setCurrentRoomId(roomId);
-            currentRoomIdRef.current = roomId;
+        socket.on(
+            "room-created",
+            ({
+                roomId,
+                roomSecret,
+                inviteToken,
+            }: {
+                roomId: string;
+                roomSecret: string;
+                inviteToken: string;
+            }) => {
+                setCurrentRoomId(roomId);
+                currentRoomIdRef.current = roomId;
+                roomSecretRef.current = roomSecret;
+                inviteTokenRef.current = inviteToken;
+                saveRoomSecret(roomId, roomSecret);
+                isHostRef.current = true;
+                setIsHost(true);
+            }
+        );
+
+        socket.on("invite-token-refreshed", ({ inviteToken }: { inviteToken: string }) => {
+            inviteTokenRef.current = inviteToken;
+        });
+
+        socket.on("room-locked", ({ locked }: { locked: boolean }) => {
+            setIsRoomLocked(locked);
+            showToast(locked ? "Room locked — no new joins" : "Room unlocked", "info");
         });
 
         socket.on(
@@ -846,7 +926,7 @@ export const Room = ({
                 setCurrentRoomId(roomId);
                 currentRoomIdRef.current = roomId;
                 existing.forEach((p) => {
-                    peerNamesRef.current.set(p.id, p.name);
+                    registerPeer(p.id, p.name);
                     ensurePeerConnection(p.id, p.name);
                     createAndSendOffer(p.id);
                 });
@@ -854,16 +934,8 @@ export const Room = ({
         );
 
         socket.on("participant-joined", ({ participant }: { roomId: string; participant: PeerSummary }) => {
-            peerNamesRef.current.set(participant.id, participant.name);
+            registerPeer(participant.id, participant.name);
             ensurePeerConnection(participant.id, participant.name);
-
-            // If we already created a tile (via early ontrack) with a placeholder name,
-            // refresh it now that we know who this peer actually is.
-            const existing = participantStateRef.current.get(participant.id);
-            if (existing && existing.name !== participant.name) {
-                participantStateRef.current.set(participant.id, { ...existing, name: participant.name });
-                syncParticipants();
-            }
 
             // Must use ref: this handler is registered once; `isScreenSharing` state would be stale here.
             if (isScreenSharingRef.current && screenVideoTrackRef.current && currentRoomIdRef.current) {
@@ -880,6 +952,7 @@ export const Room = ({
         socket.on(
             "offer",
             async ({ fromId, sdp }: { roomId: string; fromId: string; sdp: RTCSessionDescriptionInit }) => {
+                if (!peerNamesRef.current.has(fromId)) return;
                 const pc = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
                 if (!pc) return;
 
@@ -931,6 +1004,7 @@ export const Room = ({
                 fromId: string;
                 candidate: RTCIceCandidateInit;
             }) => {
+                if (!peerNamesRef.current.has(fromId)) return;
                 const pc = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
                 if (!pc || !candidate) return;
                 try {
@@ -965,6 +1039,11 @@ export const Room = ({
         );
 
         socket.on("participant-left", ({ participantId }: { roomId: string; participantId: string }) => {
+            const deathTimer = peerDeathTimersRef.current.get(participantId);
+            if (deathTimer) {
+                window.clearTimeout(deathTimer);
+                peerDeathTimersRef.current.delete(participantId);
+            }
             const pc = peersRef.current.get(participantId);
             if (pc) pc.close();
             peersRef.current.delete(participantId);
@@ -974,6 +1053,7 @@ export const Room = ({
             audioSendersRef.current.delete(participantId);
             peerNamesRef.current.delete(participantId);
             makingOfferRef.current.delete(participantId);
+            screenStatusRef.current.delete(participantId);
             removeParticipant(participantId);
         });
 
@@ -1075,10 +1155,19 @@ export const Room = ({
         }
     }, [localVideoTrack]);
 
+    const handleToggleRoomLock = useCallback(() => {
+        if (!isHostRef.current) return;
+        socketRef.current?.emit("lock-room", { locked: !isRoomLocked });
+    }, [isRoomLocked]);
+
     const handleCopyRoomId = useCallback(() => {
         if (!displayedRoomId) return;
+        const token = inviteTokenRef.current;
+        const text = token
+            ? buildInviteLink(displayedRoomId, token)
+            : displayedRoomId;
         navigator.clipboard
-            .writeText(displayedRoomId)
+            .writeText(text)
             .then(() => {
                 setCopyConfirmed(true);
                 window.setTimeout(() => setCopyConfirmed(false), 1500);
@@ -1242,7 +1331,7 @@ export const Room = ({
                                     <span className="msr sm" aria-hidden>
                                         {copyConfirmed ? "check" : "content_copy"}
                                     </span>
-                                    {copyConfirmed ? "Copied" : "Copy"}
+                                    {copyConfirmed ? "Copied" : "Copy link"}
                                 </button>
                             </div>
                         )}
@@ -1253,6 +1342,32 @@ export const Room = ({
                     <span style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
                         {totalParticipants} {totalParticipants === 1 ? "person" : "people"}
                     </span>
+                    {isHost && (
+                        <button
+                            type="button"
+                            onClick={handleToggleRoomLock}
+                            title={isRoomLocked ? "Unlock room" : "Lock room"}
+                            style={{
+                                background: isRoomLocked
+                                    ? "rgba(245, 158, 11, 0.18)"
+                                    : "rgba(255,255,255,0.06)",
+                                border: `1px solid ${isRoomLocked ? "rgba(245, 158, 11, 0.5)" : "var(--border-strong)"}`,
+                                borderRadius: 10,
+                                padding: "0.45rem 0.8rem",
+                                color: "var(--text-main)",
+                                cursor: "pointer",
+                                fontSize: "0.82rem",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.4rem",
+                            }}
+                        >
+                            <span className="msr sm" aria-hidden>
+                                {isRoomLocked ? "lock" : "lock_open"}
+                            </span>
+                            {isRoomLocked ? "Locked" : "Lock"}
+                        </button>
+                    )}
                     <button
                         onClick={() => setShowParticipants(!showParticipants)}
                         style={{
