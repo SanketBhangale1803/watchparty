@@ -11,6 +11,7 @@ import {
     saveInviteToken,
     saveRoomSecret,
 } from "../lib/session";
+import { getPeerConnectionConfig, isMobileDevice } from "../lib/webrtc";
 
 const DEFAULT_BACKEND_URL = "https://closr-live.onrender.com";
 const normalizeBackendUrl = (rawUrl: string): string => {
@@ -398,6 +399,7 @@ export const Room = ({
     const peerDeathTimersRef = useRef<Map<string, number>>(new Map());
 
     const localStreamRef = useRef<MediaStream>(new MediaStream());
+    const [localDisplayStream, setLocalDisplayStream] = useState<MediaStream>(() => new MediaStream());
     const screenStreamRef = useRef<MediaStream | null>(null);
     const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
     const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
@@ -623,6 +625,54 @@ export const Room = ({
         [createAndSendOffer]
     );
 
+    /** Rebuild local camera preview + outbound tracks after screen share stops or cam changes. */
+    const refreshLocalMedia = useCallback(() => {
+        const nextAudioTrack = buildOutboundAudioTrack(localAudioTrack, screenAudioTrackRef.current);
+        const nextLocalStream = new MediaStream();
+
+        if (localVideoTrack && localVideoTrack.readyState !== "ended") {
+            if (camEnabled && !localVideoTrack.enabled) {
+                localVideoTrack.enabled = true;
+            }
+            nextLocalStream.addTrack(localVideoTrack);
+        }
+        if (nextAudioTrack && nextAudioTrack.readyState !== "ended") {
+            nextLocalStream.addTrack(nextAudioTrack);
+        }
+
+        localStreamRef.current = nextLocalStream;
+        outboundAudioTrackRef.current = nextAudioTrack;
+        setLocalDisplayStream(nextLocalStream);
+
+        peersRef.current.forEach((pc, peerId) => {
+            const camSender = cameraSendersRef.current.get(peerId);
+            const micSender = audioSendersRef.current.get(peerId);
+
+            if (localVideoTrack && localVideoTrack.readyState !== "ended") {
+                if (camSender) {
+                    camSender.replaceTrack(localVideoTrack).catch(() => undefined);
+                } else {
+                    const sender = pc.addTrack(localVideoTrack, localStreamRef.current);
+                    cameraSendersRef.current.set(peerId, sender);
+                }
+            } else if (camSender) {
+                camSender.replaceTrack(null).catch(() => undefined);
+            }
+
+            if (nextAudioTrack && nextAudioTrack.readyState !== "ended") {
+                if (micSender) {
+                    micSender.replaceTrack(nextAudioTrack).catch(() => undefined);
+                } else {
+                    const sender = pc.addTrack(nextAudioTrack, localStreamRef.current);
+                    audioSendersRef.current.set(peerId, sender);
+                    void tuneAudioSender(sender);
+                }
+            } else if (micSender) {
+                micSender.replaceTrack(null).catch(() => undefined);
+            }
+        });
+    }, [buildOutboundAudioTrack, localAudioTrack, localVideoTrack, camEnabled]);
+
     const ensurePeerConnection = useCallback(
         (peerId: string, peerName?: string) => {
             const existing = peersRef.current.get(peerId);
@@ -634,18 +684,7 @@ export const Room = ({
             if (peerName) peerNamesRef.current.set(peerId, peerName);
 
             const socket = socketRef.current;
-            const pc = new RTCPeerConnection({
-                iceServers: [
-                    { urls: "stun:stun.l.google.com:19302" },
-                    { urls: "stun:stun1.l.google.com:19302" },
-                    { urls: "stun:stun2.l.google.com:19302" },
-                    { urls: "stun:stun3.l.google.com:19302" },
-                    { urls: "stun:stun.cloudflare.com:3478" },
-                ],
-                bundlePolicy: "max-bundle",
-                rtcpMuxPolicy: "require",
-                iceCandidatePoolSize: 4,
-            });
+            const pc = new RTCPeerConnection(getPeerConnectionConfig());
             peersRef.current.set(peerId, pc);
 
             const initialVideoTrack = localStreamRef.current.getVideoTracks()[0] ?? null;
@@ -762,12 +801,18 @@ export const Room = ({
         screenStreamRef.current = null;
         screenVideoTrackRef.current = null;
         screenAudioTrackRef.current = null;
-        syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, null));
         setScreenPreviewStream(null);
         setIsScreenSharing(false);
         isScreenSharingRef.current = false;
         emitScreenShareStatus(false, null);
-    }, [buildOutboundAudioTrack, createAndSendOffer, emitScreenShareStatus, localAudioTrack, syncOutboundAudioTrack]);
+
+        refreshLocalMedia();
+        peersRef.current.forEach((_, peerId) => createAndSendOffer(peerId));
+    }, [
+        createAndSendOffer,
+        emitScreenShareStatus,
+        refreshLocalMedia,
+    ]);
 
     const stopScreenShareRef = useRef(stopScreenShare);
     stopScreenShareRef.current = stopScreenShare;
@@ -849,41 +894,9 @@ export const Room = ({
     }, [isScreenSharing, startScreenShare, stopScreenShare]);
 
     useEffect(() => {
-        const nextAudioTrack = buildOutboundAudioTrack(localAudioTrack, screenAudioTrackRef.current);
-        const nextLocalStream = new MediaStream();
-        if (localVideoTrack) nextLocalStream.addTrack(localVideoTrack);
-        if (nextAudioTrack) nextLocalStream.addTrack(nextAudioTrack);
-        localStreamRef.current = nextLocalStream;
-        outboundAudioTrackRef.current = nextAudioTrack;
-
-        peersRef.current.forEach((pc, peerId) => {
-            const camSender = cameraSendersRef.current.get(peerId);
-            const micSender = audioSendersRef.current.get(peerId);
-
-            if (localVideoTrack) {
-                if (camSender) camSender.replaceTrack(localVideoTrack).catch(() => undefined);
-                else {
-                    const sender = pc.addTrack(localVideoTrack, localStreamRef.current);
-                    cameraSendersRef.current.set(peerId, sender);
-                }
-            } else if (camSender) {
-                camSender.replaceTrack(null).catch(() => undefined);
-            }
-
-            if (nextAudioTrack) {
-                if (micSender) micSender.replaceTrack(nextAudioTrack).catch(() => undefined);
-                else {
-                    const sender = pc.addTrack(nextAudioTrack, localStreamRef.current);
-                    audioSendersRef.current.set(peerId, sender);
-                    void tuneAudioSender(sender);
-                }
-            } else if (micSender) {
-                micSender.replaceTrack(null).catch(() => undefined);
-            }
-
-            createAndSendOffer(peerId);
-        });
-    }, [buildOutboundAudioTrack, createAndSendOffer, localAudioTrack, localVideoTrack]);
+        refreshLocalMedia();
+        peersRef.current.forEach((_, peerId) => createAndSendOffer(peerId));
+    }, [createAndSendOffer, refreshLocalMedia, localAudioTrack, localVideoTrack, camEnabled]);
 
     useEffect(() => {
         const video = localScreenPreviewRef.current;
@@ -895,12 +908,12 @@ export const Room = ({
     useEffect(() => {
         const socket = io(URL, {
             path: "/socket.io",
-            transports: ["websocket", "polling"],
+            transports: isMobileDevice() ? ["polling", "websocket"] : ["websocket", "polling"],
             reconnection: true,
             reconnectionAttempts: Infinity,
             reconnectionDelay: 800,
-            reconnectionDelayMax: 5000,
-            timeout: 15_000,
+            reconnectionDelayMax: 8000,
+            timeout: 25_000,
         });
         socketRef.current = socket;
 
@@ -1307,6 +1320,12 @@ export const Room = ({
         return sharing ? { id: sharing.id, name: sharing.name, isLocal: false } : null;
     }, [isScreenSharing, remoteParticipants, name]);
 
+    useEffect(() => {
+        if (sharingParticipant && isMobileDevice()) {
+            setShowParticipants(true);
+        }
+    }, [sharingParticipant]);
+
     const remoteScreenShareStream = useMemo(() => {
         if (!sharingParticipant || sharingParticipant.isLocal) return null;
         const peer = remoteParticipants.find((p) => p.id === sharingParticipant.id);
@@ -1318,27 +1337,33 @@ export const Room = ({
     }, [sharingParticipant, remoteParticipants]);
 
     const allTiles = useMemo(() => {
-        const tiles = [{ id: "self", name, displayStream: localStreamRef.current, isLocal: true }];
+        const tiles = [{ id: "self", name, displayStream: localDisplayStream, isLocal: true }];
         remoteParticipants.forEach((p) => {
             tiles.push({ id: p.id, name: p.name, displayStream: p.displayStream, isLocal: false });
         });
         return tiles;
-    }, [name, remoteParticipants]);
+    }, [name, remoteParticipants, localDisplayStream]);
 
     const nonSharingTiles = useMemo(() => {
         if (!sharingParticipant) return allTiles;
         return allTiles.filter(t => t.id !== sharingParticipant.id);
     }, [allTiles, sharingParticipant]);
 
+    const tileCount = sharingParticipant ? nonSharingTiles.length : allTiles.length;
+
+    const gridRows = useMemo(() => {
+        if (tileCount <= 1) return "1fr";
+        return `repeat(${tileCount}, minmax(0, 1fr))`;
+    }, [tileCount]);
+
     const gridCols = useMemo(() => {
-        const count = sharingParticipant ? nonSharingTiles.length : allTiles.length;
-        if (count <= 1) return "1fr";
-        if (count === 2) return "1fr 1fr";
-        if (count <= 4) return "1fr 1fr";
-        if (count <= 6) return "1fr 1fr 1fr";
-        if (count <= 9) return "1fr 1fr 1fr";
+        if (tileCount <= 1) return "1fr";
+        if (tileCount === 2) return "1fr 1fr";
+        if (tileCount <= 4) return "1fr 1fr";
+        if (tileCount <= 6) return "1fr 1fr 1fr";
+        if (tileCount <= 9) return "1fr 1fr 1fr";
         return "1fr 1fr 1fr 1fr";
-    }, [allTiles.length, sharingParticipant, nonSharingTiles.length]);
+    }, [tileCount]);
 
     const totalParticipants = 1 + remoteParticipants.length;
 
@@ -1409,37 +1434,17 @@ export const Room = ({
         window.location.reload();
     }, [stopScreenShare, disposeMixedAudio]);
 
+    const localCameraOnlyStream = useMemo(() => {
+        if (!localVideoTrack || localVideoTrack.readyState === "ended") return null;
+        return new MediaStream([localVideoTrack]);
+    }, [localVideoTrack, localDisplayStream]);
+
     return (
         <div
             ref={containerRef}
-            className={isFullscreen ? "" : "app-backdrop"}
-            style={{
-                width: "100%",
-                maxWidth: "100vw",
-                height: "100vh",
-                overflow: "hidden",
-                boxSizing: "border-box",
-                backgroundColor: isFullscreen ? "#000" : undefined,
-                display: "flex",
-                flexDirection: "column",
-            }}
+            className={`room-shell ${isFullscreen ? "room-shell--fullscreen" : "app-backdrop"}`}
         >
-            {/* Header */}
-            <div
-                style={{
-                    padding: "0.85rem 1.4rem",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "1rem",
-                    background: "rgba(11, 15, 26, 0.78)",
-                    backdropFilter: "blur(14px)",
-                    WebkitBackdropFilter: "blur(14px)",
-                    borderBottom: "1px solid var(--border)",
-                    flexShrink: 0,
-                    zIndex: 10,
-                }}
-            >
+            <header className="room-header">
                 <div style={{ display: "flex", alignItems: "center", gap: "0.85rem", minWidth: 0 }}>
                     <img
                         src="/logo.png"
@@ -1547,8 +1552,8 @@ export const Room = ({
                     </div>
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                    <span style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
+                <div className="room-header__actions">
+                    <span className="room-header__count">
                         {totalParticipants} {totalParticipants === 1 ? "person" : "people"}
                     </span>
                     {isHost && (
@@ -1556,68 +1561,34 @@ export const Room = ({
                             type="button"
                             onClick={handleToggleRoomLock}
                             title={isRoomLocked ? "Unlock room" : "Lock room"}
-                            style={{
-                                background: isRoomLocked
-                                    ? "rgba(245, 158, 11, 0.18)"
-                                    : "rgba(255,255,255,0.06)",
-                                border: `1px solid ${isRoomLocked ? "rgba(245, 158, 11, 0.5)" : "var(--border-strong)"}`,
-                                borderRadius: 10,
-                                padding: "0.45rem 0.8rem",
-                                color: "var(--text-main)",
-                                cursor: "pointer",
-                                fontSize: "0.82rem",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.4rem",
-                            }}
+                            className={`room-header__btn ${isRoomLocked ? "is-locked" : ""}`}
                         >
                             <span className="msr sm" aria-hidden>
                                 {isRoomLocked ? "lock" : "lock_open"}
                             </span>
-                            {isRoomLocked ? "Locked" : "Lock"}
+                            <span className="room-header__btn-label">
+                                {isRoomLocked ? "Locked" : "Lock"}
+                            </span>
                         </button>
                     )}
                     <button
-                        onClick={() => setShowParticipants(!showParticipants)}
-                        style={{
-                            background: showParticipants ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)",
-                            border: "1px solid var(--border-strong)",
-                            borderRadius: 10,
-                            padding: "0.45rem 0.8rem",
-                            color: "var(--text-main)",
-                            cursor: "pointer",
-                            fontSize: "0.82rem",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.4rem",
-                            transition: "all 0.18s ease",
-                        }}
+                        type="button"
+                        onClick={() => setShowParticipants((open) => !open)}
+                        className={`room-header__btn ${showParticipants ? "is-active" : ""}`}
+                        aria-pressed={showParticipants}
+                        aria-label={showParticipants ? "Hide participants panel" : "Show participants panel"}
+                        title={showParticipants ? "Hide participants" : "Show participants"}
                     >
                         <span className="msr sm" aria-hidden>group</span>
-                        Participants
+                        <span className="room-header__btn-label">People</span>
                     </button>
                 </div>
-            </div>
+            </header>
 
-            {/* Main content area */}
-            <div style={{
-                flex: 1,
-                display: "flex",
-                overflow: "hidden",
-                minHeight: 0,
-                gap: "0.75rem",
-                padding: "0.75rem",
-            }}>
-                {/* Center: Main display (screen share or grid) */}
-                <div style={{
-                    flex: sharingParticipant ? "1 1 68%" : 1,
-                    minWidth: 0,
-                    display: "flex",
-                    flexDirection: "column",
-                    overflow: "hidden",
-                    borderRadius: "0.75rem",
-                    background: "#1e293b",
-                }}>
+            <div
+                className={`room-stage${sharingParticipant ? " room-stage--sharing" : ""}${showParticipants ? " room-stage--people-open" : ""}`}
+            >
+                <div className="room-main">
                     {/* Screen share view - show when someone is sharing */}
                     {sharingParticipant ? (
                         <div style={{
@@ -1660,16 +1631,15 @@ export const Room = ({
                         </div>
                     ) : (
                         /* Regular grid when no sharing - show all in main area */
-                        <div style={{
-                            flex: 1,
-                            display: "grid",
-                            gridTemplateColumns: gridCols,
-                            gap: "0.75rem",
-                            gridAutoRows: "1fr",
-                            padding: "0.75rem",
-                            minHeight: 0,
-                            alignContent: "start",
-                        }}>
+                        <div
+                            className="room-participant-grid"
+                            style={
+                                {
+                                    "--participant-grid-rows": gridRows,
+                                    "--participant-grid-cols": gridCols,
+                                } as React.CSSProperties
+                            }
+                        >
                             {allTiles.map((tile) => {
                                 return (
                                     <ParticipantVideo
@@ -1686,87 +1656,52 @@ export const Room = ({
                     )}
                 </div>
 
-                {/* Right panel: Only show when someone is sharing */}
-                {sharingParticipant && (
-                    <div style={{
-                        width: "286px",
-                        flex: "0 0 286px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "0.55rem",
-                        overflow: "hidden",
-                        flexShrink: 0,
-                    }}>
-                        <div style={{
-                            fontSize: "0.75rem",
-                            color: "#94a3b8",
-                            padding: "0.25rem 0",
-                            textAlign: "center",
-                            flexShrink: 0,
-                        }}>
+                {showParticipants && (
+                    <aside
+                        className={`room-sidebar${sharingParticipant ? "" : " room-sidebar--names"}`}
+                        aria-label="Participants"
+                    >
+                        <div className="room-sidebar__title">
                             Participants ({allTiles.length})
                         </div>
-                        <div style={{
-                            flex: 1,
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "0.5rem",
-                            overflow: "auto",
-                            paddingRight: "2px",
-                        }}>
-                            {/* Local video - show camera */}
-                            <div style={{
-                                width: "100%",
-                                aspectRatio: "16/9",
-                                borderRadius: "0.5rem",
-                                overflow: "hidden",
-                                flexShrink: 0,
-                            }}>
-                                <ParticipantVideo
-                                    stream={new MediaStream(localVideoTrack ? [localVideoTrack] : [])}
-                                    label={name}
-                                    mirrored
-                                    muted
-                                    isLocal
-                                />
-                            </div>
-
-                            {/* Remote videos - show camera for each participant */}
-                            {remoteParticipants.map((p) => (
-                                <div key={p.id} style={{
-                                    width: "100%",
-                                    aspectRatio: "16/9",
-                                    borderRadius: "0.5rem",
-                                    overflow: "hidden",
-                                    flexShrink: 0,
-                                }}>
-                                    <ParticipantVideo
-                                        stream={p.cameraStream}
-                                        label={p.name}
-                                        muted
-                                    />
-                                </div>
-                            ))}
+                        <div className="room-sidebar__list">
+                            {sharingParticipant ? (
+                                <>
+                                    <div className="room-sidebar__tile">
+                                        <ParticipantVideo
+                                            stream={localCameraOnlyStream}
+                                            label={name}
+                                            mirrored
+                                            muted
+                                            isLocal
+                                        />
+                                    </div>
+                                    {remoteParticipants.map((p) => (
+                                        <div key={p.id} className="room-sidebar__tile">
+                                            <ParticipantVideo
+                                                stream={p.cameraStream}
+                                                label={p.name}
+                                                muted
+                                            />
+                                        </div>
+                                    ))}
+                                </>
+                            ) : (
+                                allTiles.map((tile) => (
+                                    <div key={tile.id} className="room-sidebar__name">
+                                        {tile.name}
+                                        {tile.isLocal ? (
+                                            <span className="room-sidebar__name-you">You</span>
+                                        ) : null}
+                                    </div>
+                                ))
+                            )}
                         </div>
-                    </div>
+                    </aside>
                 )}
             </div>
 
-            {/* Control bar */}
-            <div
-                style={{
-                    display: "flex",
-                    justifyContent: "center",
-                    alignItems: "center",
-                    gap: "0.65rem",
-                    padding: "0.85rem 1.5rem 1rem",
-                    background: "rgba(11, 15, 26, 0.85)",
-                    backdropFilter: "blur(14px)",
-                    WebkitBackdropFilter: "blur(14px)",
-                    borderTop: "1px solid var(--border)",
-                    flexShrink: 0,
-                }}
-            >
+            <div className="room-controls">
                 <button
                     type="button"
                     onClick={handleToggleMic}
@@ -1816,12 +1751,12 @@ export const Room = ({
                 <button
                     type="button"
                     onClick={handleLeave}
-                    className="ctrl-btn is-danger"
+                    className="ctrl-btn is-danger room-controls__leave"
                     aria-label="Leave call"
                     title="Leave call"
                 >
                     <span className="msr sm" aria-hidden>call_end</span>
-                    Leave
+                    <span className="room-controls__leave-text">Leave</span>
                 </button>
             </div>
 
