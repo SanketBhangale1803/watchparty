@@ -1,0 +1,17 @@
+# Render Blueprint — optional. You can also set these in the Render Dashboard manually.
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: closr-signaling
+    runtime: node
+    buildCommand: npm run build
+    startCommand: npm run start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: INVITE_SIGNING_KEY
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        value: https://closr-live.vercel.app

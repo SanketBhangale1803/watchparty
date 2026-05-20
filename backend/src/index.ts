@@ -88,7 +88,11 @@ server.listen(PORT, () => {
     }
     if (process.env.NODE_ENV === "production" && !process.env.INVITE_SIGNING_KEY?.trim()) {
         console.error(
-            "FATAL: INVITE_SIGNING_KEY is not set. Add it in Railway → Variables (openssl rand -hex 32)."
+            "FATAL: INVITE_SIGNING_KEY is not set.\n" +
+                "  Render: Dashboard → your web service → Environment → Add Secret\n" +
+                "    INVITE_SIGNING_KEY = output of: openssl rand -hex 32\n" +
+                "    ALLOWED_ORIGINS = your frontend URL (e.g. https://closr-live.vercel.app)\n" +
+                "  Then trigger a manual deploy."
         );
         process.exit(1);
     } else if (!process.env.INVITE_SIGNING_KEY?.trim()) {
