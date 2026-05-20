@@ -1,3 +1,5 @@
+import "./loadEnv";
+
 import { Socket } from "socket.io";
 import http from "http";
 import express, { Request, Response } from "express";
@@ -84,9 +86,14 @@ server.listen(PORT, () => {
     if (allowedOrigins !== "*") {
         console.log(`CORS restricted to: ${(allowedOrigins as string[]).join(", ")}`);
     }
-    if (!process.env.INVITE_SIGNING_KEY?.trim()) {
+    if (process.env.NODE_ENV === "production" && !process.env.INVITE_SIGNING_KEY?.trim()) {
+        console.error(
+            "FATAL: INVITE_SIGNING_KEY is not set. Add it in Railway → Variables (openssl rand -hex 32)."
+        );
+        process.exit(1);
+    } else if (!process.env.INVITE_SIGNING_KEY?.trim()) {
         console.warn(
-            "WARNING: INVITE_SIGNING_KEY is not set — invite tokens use a dev-only pepper. Set it in production."
+            "INVITE_SIGNING_KEY not set — using dev pepper. Copy backend/.env.example to backend/.env for local dev."
         );
     }
 });
