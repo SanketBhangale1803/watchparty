@@ -16,6 +16,10 @@ interface Room {
     locked: boolean;
     participants: Map<string, User>;
     clientIds: Map<string, string>;
+    /** Client ids that have joined at least once — may rejoin while room is locked. */
+    knownClientIds: Set<string>;
+    /** Only one active screen sharer per room. */
+    screenSharerId: string | null;
     createdAt: number;
     lastActivityAt: number;
     expiresAt: number;
@@ -85,17 +89,19 @@ export class RoomManager {
 
     private touch(room: Room) {
         room.lastActivityAt = Date.now();
+        // Sliding expiry — active rooms stay alive while people are in the call.
+        room.expiresAt = Date.now() + ROOM_MAX_LIFETIME_MS;
     }
 
     private isRoomExpired(room: Room): boolean {
-        return Date.now() > room.expiresAt;
+        return room.participants.size === 0 && Date.now() > room.expiresAt;
     }
 
     private pruneExpiredRooms() {
         const now = Date.now();
         for (const [roomId, room] of this.rooms.entries()) {
-            const emptyTooLong =
-                room.participants.size === 0 && now - room.lastActivityAt > ROOM_EMPTY_TTL_MS;
+            if (room.participants.size > 0) continue;
+            const emptyTooLong = now - room.lastActivityAt > ROOM_EMPTY_TTL_MS;
             if (this.isRoomExpired(room) || emptyTooLong) {
                 this.rooms.delete(roomId);
             }
@@ -105,8 +111,22 @@ export class RoomManager {
     private evictSocket(room: Room, roomId: string, socketId: string) {
         if (!room.participants.has(socketId)) return;
 
+        const wasScreenSharer = room.screenSharerId === socketId;
         room.participants.delete(socketId);
         this.userRoomMap.delete(socketId);
+
+        if (wasScreenSharer) {
+            room.screenSharerId = null;
+            room.participants.forEach((participant) => {
+                participant.socket.emit("screen-share-status", {
+                    roomId,
+                    senderId: socketId,
+                    isSharing: false,
+                    trackId: null,
+                    activeSharerId: null,
+                });
+            });
+        }
 
         for (const [clientId, sid] of room.clientIds.entries()) {
             if (sid === socketId) {
@@ -157,12 +177,17 @@ export class RoomManager {
         const clientIds = new Map<string, string>();
         if (host.clientId) clientIds.set(host.clientId, host.socket.id);
 
+        const knownClientIds = new Set<string>();
+        if (host.clientId) knownClientIds.add(host.clientId);
+
         this.rooms.set(roomId, {
             secretHash: hashRoomSecret(roomSecret),
             hostClientId: host.clientId,
             locked: false,
             participants,
             clientIds,
+            knownClientIds,
+            screenSharerId: null,
             createdAt: now,
             lastActivityAt: now,
             expiresAt: now + ROOM_MAX_LIFETIME_MS,
@@ -189,18 +214,15 @@ export class RoomManager {
             return { ok: false, reason: "not_found" };
         }
 
-        if (this.isRoomExpired(room)) {
-            this.rooms.delete(normalized);
-            return { ok: false, reason: "expired" };
-        }
-
         if (!this.authorizeJoin(room, normalized, opts.roomSecret, opts.inviteToken)) {
             return { ok: false, reason: "forbidden" };
         }
 
         const isHost = user.clientId === room.hostClientId;
+        const isKnownClient = Boolean(user.clientId && room.knownClientIds.has(user.clientId));
 
-        if (room.locked && !isHost && !room.participants.has(user.socket.id)) {
+        // Lock only blocks brand-new guests, not the host or anyone who already joined this room.
+        if (room.locked && !isHost && !isKnownClient && !room.participants.has(user.socket.id)) {
             return { ok: false, reason: "locked" };
         }
 
@@ -237,7 +259,10 @@ export class RoomManager {
 
         room.participants.set(user.socket.id, user);
         this.userRoomMap.set(user.socket.id, normalized);
-        if (user.clientId) room.clientIds.set(user.clientId, user.socket.id);
+        if (user.clientId) {
+            room.clientIds.set(user.clientId, user.socket.id);
+            room.knownClientIds.add(user.clientId);
+        }
         this.touch(room);
 
         user.socket.emit("room-joined", {
@@ -291,7 +316,7 @@ export class RoomManager {
         const located = this.getRoomForSocket(senderSocketId);
         if (!located) return null;
         if (located.roomId !== this.normalizeRoomId(claimedRoomId)) return null;
-        if (this.isRoomExpired(located.room)) return null;
+        this.touch(located.room);
         return located.room;
     }
 
@@ -345,16 +370,37 @@ export class RoomManager {
     onScreenShareStatus(roomId: string, senderSocketId: string, isSharing: boolean, trackId: string | null) {
         const room = this.assertSenderInRoom(senderSocketId, roomId);
         if (!room || !room.participants.has(senderSocketId)) return;
-        this.touch(room);
-        room.participants.forEach((participant) => {
-            if (participant.socket.id !== senderSocketId) {
-                participant.socket.emit("screen-share-status", {
-                    roomId: this.normalizeRoomId(roomId),
-                    senderId: senderSocketId,
-                    isSharing,
-                    trackId,
+
+        const normalized = this.normalizeRoomId(roomId);
+
+        if (isSharing) {
+            const previousSharer = room.screenSharerId;
+            if (previousSharer && previousSharer !== senderSocketId) {
+                const prevUser = room.participants.get(previousSharer);
+                prevUser?.socket.emit("screen-share-revoked", {
+                    roomId: normalized,
+                    newSharerId: senderSocketId,
+                });
+                prevUser?.socket.emit("screen-share-status", {
+                    roomId: normalized,
+                    senderId: previousSharer,
+                    isSharing: false,
+                    trackId: null,
                 });
             }
+            room.screenSharerId = senderSocketId;
+        } else if (room.screenSharerId === senderSocketId) {
+            room.screenSharerId = null;
+        }
+
+        room.participants.forEach((participant) => {
+            participant.socket.emit("screen-share-status", {
+                roomId: normalized,
+                senderId: senderSocketId,
+                isSharing,
+                trackId,
+                activeSharerId: room.screenSharerId,
+            });
         });
     }
 

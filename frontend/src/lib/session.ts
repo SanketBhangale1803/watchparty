@@ -30,6 +30,22 @@ export function loadRoomSecret(roomId: string): string | null {
 }
 
 /** Prefer token in URLs — the long-lived room key stays in sessionStorage for the host only. */
+export function saveInviteToken(roomId: string, token: string) {
+    try {
+        sessionStorage.setItem(`closr-invite-${roomId.toUpperCase()}`, token);
+    } catch {
+        /* ignore */
+    }
+}
+
+export function loadInviteToken(roomId: string): string | null {
+    try {
+        return sessionStorage.getItem(`closr-invite-${roomId.toUpperCase()}`);
+    } catch {
+        return null;
+    }
+}
+
 export function buildInviteLink(roomId: string, inviteToken: string): string {
     const url = new URL(window.location.origin);
     url.searchParams.set("room", roomId);

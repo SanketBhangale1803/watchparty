@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { parseInviteFromUrl } from "../lib/session";
+import { parseInviteFromUrl, saveInviteToken } from "../lib/session";
 import { Room } from "./Room";
 
 export const Landing = () => {
@@ -25,6 +25,7 @@ export const Landing = () => {
         const { roomId: r, inviteToken: t, legacySecret } = parseInviteFromUrl(searchParams);
         if (r) setRoomId(r);
         if (t) setInviteToken(t);
+        if (r && t) saveInviteToken(r, t);
         if (legacySecret) setLegacyRoomKey(legacySecret);
     }, [searchParams]);
 
