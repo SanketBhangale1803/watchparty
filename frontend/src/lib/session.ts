@@ -46,6 +46,45 @@ export function loadInviteToken(roomId: string): string | null {
     }
 }
 
+export type ActiveRoomSession = {
+    roomId: string;
+    isHost: boolean;
+};
+
+const ACTIVE_ROOM_KEY = "closr-active-room";
+
+/** Remember which room this tab is in so socket reconnects re-join instead of creating a new room. */
+export function saveActiveRoomSession(roomId: string, isHost: boolean) {
+    try {
+        sessionStorage.setItem(
+            ACTIVE_ROOM_KEY,
+            JSON.stringify({ roomId: roomId.toUpperCase(), isHost })
+        );
+    } catch {
+        /* ignore */
+    }
+}
+
+export function loadActiveRoomSession(): ActiveRoomSession | null {
+    try {
+        const raw = sessionStorage.getItem(ACTIVE_ROOM_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as ActiveRoomSession;
+        if (!parsed?.roomId) return null;
+        return { roomId: parsed.roomId.toUpperCase(), isHost: Boolean(parsed.isHost) };
+    } catch {
+        return null;
+    }
+}
+
+export function clearActiveRoomSession() {
+    try {
+        sessionStorage.removeItem(ACTIVE_ROOM_KEY);
+    } catch {
+        /* ignore */
+    }
+}
+
 export function buildInviteLink(roomId: string, inviteToken: string): string {
     const url = new URL(window.location.origin);
     url.searchParams.set("room", roomId);
