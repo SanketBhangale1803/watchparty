@@ -99,14 +99,76 @@ export function buildInviteLink(roomId: string, inviteToken: string): string {
     return url.toString();
 }
 
+export type ParsedInvite = {
+    roomId: string;
+    inviteToken: string | null;
+    legacySecret: string | null;
+};
+
+function inviteFromSearchParams(params: URLSearchParams): ParsedInvite | null {
+    const roomId = params.get("room")?.trim().toUpperCase() || null;
+    if (!roomId) return null;
+
+    const inviteToken =
+        params.get("t")?.trim() || params.get("token")?.trim() || null;
+    const legacySecret = params.get("key")?.trim() || null;
+
+    if (inviteToken || legacySecret) {
+        return { roomId, inviteToken, legacySecret };
+    }
+    return null;
+}
+
 export function parseInviteFromUrl(searchParams: URLSearchParams): {
     roomId: string | null;
     inviteToken: string | null;
     legacySecret: string | null;
 } {
-    const roomId = searchParams.get("room")?.trim().toUpperCase() || null;
-    const inviteToken =
-        searchParams.get("t")?.trim() || searchParams.get("token")?.trim() || null;
-    const legacySecret = searchParams.get("key")?.trim() || null;
-    return { roomId, inviteToken, legacySecret };
+    const parsed = inviteFromSearchParams(searchParams);
+    return {
+        roomId: parsed?.roomId ?? null,
+        inviteToken: parsed?.inviteToken ?? null,
+        legacySecret: parsed?.legacySecret ?? null,
+    };
+}
+
+/**
+ * Parse a pasted invite link. Room codes alone are rejected — a token (?t=) or legacy key (?key=) is required.
+ */
+export function parseInviteLinkInput(raw: string): ParsedInvite | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+
+    const origin =
+        typeof window !== "undefined" ? window.location.origin : "https://closr.local";
+
+    const tryParse = (href: string): ParsedInvite | null => {
+        try {
+            return inviteFromSearchParams(new URL(href).searchParams);
+        } catch {
+            return null;
+        }
+    };
+
+    if (/^https?:\/\//i.test(trimmed)) {
+        return tryParse(trimmed);
+    }
+
+    if (trimmed.includes("room=")) {
+        const qIndex = trimmed.indexOf("?");
+        const query = qIndex >= 0 ? trimmed.slice(qIndex) : `?${trimmed}`;
+        const normalized = query.startsWith("?") ? query : `?${query}`;
+        return tryParse(`${origin}${normalized}`);
+    }
+
+    return null;
+}
+
+export function isValidInviteCredentials(
+    roomId: string,
+    inviteToken: string,
+    legacySecret: string
+): boolean {
+    if (!roomId.trim()) return false;
+    return Boolean(inviteToken.trim() || legacySecret.trim());
 }
