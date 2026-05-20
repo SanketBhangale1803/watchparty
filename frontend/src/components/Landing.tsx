@@ -51,11 +51,13 @@ export const Landing = () => {
     const getCam = async () => {
         try {
             setMediaError(null);
+            const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
             const stream = await window.navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 },
-                    frameRate: { ideal: 30 },
+                    facingMode: "user",
+                    width: { ideal: isMobile ? 640 : 1280, max: 1280 },
+                    height: { ideal: isMobile ? 480 : 720, max: 720 },
+                    frameRate: { ideal: 24, max: 30 },
                 },
                 audio: {
                     echoCancellation: true,
