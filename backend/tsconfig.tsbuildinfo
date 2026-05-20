@@ -1,1 +1,1 @@
-{"root":["./src/index.ts","./src/managers/roommanager.ts","./src/managers/usermanger.ts"],"version":"5.9.3"}
+{"root":["./src/index.ts","./src/loadenv.ts","./src/ratelimit.ts","./src/security.ts","./src/managers/roommanager.ts","./src/managers/usermanger.ts"],"version":"5.9.3"}
