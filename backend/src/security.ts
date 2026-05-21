@@ -99,4 +99,8 @@ export function verifyInviteToken(roomId: string, token: string): boolean {
 }
 
 export const ROOM_MAX_LIFETIME_MS = Number(process.env.ROOM_MAX_LIFETIME_MS) || 4 * 60 * 60 * 1000;
-export const ROOM_EMPTY_TTL_MS = Number(process.env.ROOM_EMPTY_TTL_MS) || 5 * 60 * 1000;
+/** How long an empty room with no prior guests may stay in memory. */
+export const ROOM_EMPTY_TTL_MS = Number(process.env.ROOM_EMPTY_TTL_MS) || 30 * 60 * 1000;
+/** Empty room retention when someone has joined before (reconnect / brief disconnect). */
+export const ROOM_EMPTY_KNOWN_CLIENTS_TTL_MS =
+    Number(process.env.ROOM_EMPTY_KNOWN_CLIENTS_TTL_MS) || 2 * 60 * 60 * 1000;

@@ -1,7 +1,7 @@
 import { Socket } from "socket.io";
 import { RateLimiter } from "../rateLimit";
 import { isValidClientId, isValidRoomSecret, sanitizeDisplayName } from "../security";
-import { RoomManager } from "./RoomManager";
+import { JoinResult, RoomManager } from "./RoomManager";
 
 export interface User {
     socket: Socket;
@@ -15,8 +15,8 @@ const stamp = () => new Date().toISOString();
 const JOIN_DENIED =
     "Could not join this room. Check your invite link or ask the host for a new one.";
 
-/** Keep participants in the room briefly after disconnect so Socket.IO can reconnect. */
-const DISCONNECT_GRACE_MS = 25_000;
+/** Keep participants in the room after disconnect so Socket.IO / mobile can reconnect. */
+const DISCONNECT_GRACE_MS = 60_000;
 
 export class UserManager {
     private users: Map<string, User>;
@@ -77,8 +77,12 @@ export class UserManager {
         return socket.handshake.address || socket.id;
     }
 
-    private joinError(socket: Socket, message: string = JOIN_DENIED) {
-        socket.emit("room-join-error", { message });
+    private joinError(
+        socket: Socket,
+        message: string = JOIN_DENIED,
+        reason?: Extract<JoinResult, { ok: false }>["reason"]
+    ) {
+        socket.emit("room-join-error", { message, ...(reason ? { reason } : {}) });
     }
 
     private initHandlers(socket: Socket) {
@@ -181,7 +185,7 @@ export class UserManager {
                     console.log(
                         `[${stamp()}] [join-fail] socket=${socket.id} user="${user.name}" room=${roomId} reason=${result.reason}`
                     );
-                    this.joinError(socket, messages[result.reason] ?? JOIN_DENIED);
+                    this.joinError(socket, messages[result.reason] ?? JOIN_DENIED, result.reason);
                     return;
                 }
 
