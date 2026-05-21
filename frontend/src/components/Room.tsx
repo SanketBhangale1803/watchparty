@@ -11,6 +11,7 @@ import {
     saveInviteToken,
     saveRoomSecret,
 } from "../lib/session";
+import { startSignalingKeepalive, stopSignalingKeepalive } from "../lib/keepalive";
 import { getPeerConnectionConfig, isMobileDevice } from "../lib/webrtc";
 
 const DEFAULT_BACKEND_URL = "https://closr-live.onrender.com";
@@ -336,6 +337,7 @@ export const Room = ({
     const restoredToken = restoredRoomId ? loadInviteToken(restoredRoomId) : null;
 
     const [, setLobby] = useState(true);
+    const [inCall, setInCall] = useState(false);
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(restoredRoomId);
     const [participants, setParticipants] = useState<ParticipantState[]>([]);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -1084,6 +1086,7 @@ export const Room = ({
                 isHost?: boolean;
             }) => {
                 setLobby(false);
+                setInCall(true);
                 setCurrentRoomId(roomId);
                 currentRoomIdRef.current = roomId;
                 if (joinedAsHost !== undefined) {
@@ -1276,6 +1279,7 @@ export const Room = ({
         });
 
         return () => {
+            stopSignalingKeepalive();
             stopScreenShare();
             peersRef.current.forEach((pc) => pc.close());
             peersRef.current.clear();
@@ -1397,7 +1401,17 @@ export const Room = ({
             .catch(() => undefined);
     }, [displayedRoomId]);
 
+    useEffect(() => {
+        if (inCall) {
+            startSignalingKeepalive(URL);
+            return () => stopSignalingKeepalive();
+        }
+        stopSignalingKeepalive();
+    }, [inCall]);
+
     const handleLeave = useCallback(() => {
+        stopSignalingKeepalive();
+        setInCall(false);
         stopScreenShare();
         // Tell the server before we drop the socket so the other peers see us leave
         // immediately, instead of waiting for a ping timeout.
