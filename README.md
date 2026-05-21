@@ -1,6 +1,6 @@
 # Closr
 
-Built on top of [omegle](https://github.com/hkirat/omegle) with a cleaner UI.
+Built on top of https://github.com/hkirat/omegle with a cleaner UI.
 
 Closr is a browser-based group video calling app for casual hangouts—study sessions, game nights, or quick catch-ups. No accounts, no install, no ads. Media flows peer-to-peer when the network allows; the backend only handles signaling and room state.
 
