@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { User } from "./UserManger";
 import {
+    ROOM_EMPTY_KNOWN_CLIENTS_TTL_MS,
     ROOM_EMPTY_TTL_MS,
     ROOM_MAX_LIFETIME_MS,
     createInviteToken,
@@ -101,8 +102,22 @@ export class RoomManager {
         const now = Date.now();
         for (const [roomId, room] of this.rooms.entries()) {
             if (room.participants.size > 0) continue;
-            const emptyTooLong = now - room.lastActivityAt > ROOM_EMPTY_TTL_MS;
-            if (this.isRoomExpired(room) || emptyTooLong) {
+
+            const emptyMs = now - room.lastActivityAt;
+            const emptyTtl =
+                room.knownClientIds.size > 0
+                    ? ROOM_EMPTY_KNOWN_CLIENTS_TTL_MS
+                    : ROOM_EMPTY_TTL_MS;
+            const emptyTooLong = emptyMs > emptyTtl;
+            const maxLifetimeExpired = this.isRoomExpired(room);
+
+            if (maxLifetimeExpired || emptyTooLong) {
+                const reason = maxLifetimeExpired ? "max_lifetime" : "empty_ttl";
+                console.log(
+                    `[${new Date().toISOString()}] [prune]      room=${roomId}` +
+                        ` reason=${reason} emptyMs=${Math.round(emptyMs / 1000)}s` +
+                        ` knownClients=${room.knownClientIds.size}`
+                );
                 this.rooms.delete(roomId);
             }
         }

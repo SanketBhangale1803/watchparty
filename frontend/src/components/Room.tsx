@@ -1257,9 +1257,19 @@ export const Room = ({
             removeParticipant(participantId);
         });
 
-        socket.on("room-join-error", ({ message }: { message: string }) => {
-            showToast(message || "Could not join room", "error");
-        });
+        socket.on(
+            "room-join-error",
+            ({ message, reason }: { message: string; reason?: string }) => {
+                const text =
+                    reason === "not_found"
+                        ? "This room no longer exists on the server (idle timeout or restart). Ask the host to create a new room and share a fresh invite link."
+                        : message || "Could not join room";
+                showToast(text, "error");
+                if (reason === "not_found") {
+                    setConnectionStatus("connecting");
+                }
+            }
+        );
 
         socket.on("room-lock-error", ({ message }: { message: string }) => {
             showToast(message || "Could not change room lock", "error");
@@ -1287,27 +1297,6 @@ export const Room = ({
             disposeMixedAudio();
         };
     }, [disposeMixedAudio]);
-
-    // Tell the server we're leaving when the tab closes / navigates away, so other
-    // peers don't have to wait for a ping timeout to see us disappear.
-    useEffect(() => {
-        const announceLeave = () => {
-            const s = socketRef.current;
-            if (!s) return;
-            try {
-                s.volatile.emit("leave-room");
-                s.disconnect();
-            } catch {
-                /* ignore */
-            }
-        };
-        window.addEventListener("pagehide", announceLeave);
-        window.addEventListener("beforeunload", announceLeave);
-        return () => {
-            window.removeEventListener("pagehide", announceLeave);
-            window.removeEventListener("beforeunload", announceLeave);
-        };
-    }, []);
 
     const remoteParticipants = useMemo(
         () => participants.filter((p) => p.id !== socketIdRef.current),
